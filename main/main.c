@@ -351,6 +351,8 @@ void app_main(void)
         ESP_LOGI(TAG, "NVS initialized from existing data");
     }
 
+    User_Settings_Print();
+
     if (USER_ENABLE_BACNET_IP) {
         /* Initialize network stack (must be done before WiFi init) */
         esp_netif_init();
@@ -390,9 +392,7 @@ void app_main(void)
     }
 
     Device_Init(NULL);
-    Device_Set_Object_Instance_Number(USER_BACNET_DEVICE_INSTANCE);
-    Device_Set_Vendor_Identifier(260);
-    Device_Object_Name_ANSI_Init(USER_BACNET_DEVICE_NAME);
+    User_Settings_InitDeviceIdentity();
 
     /* Register service handlers - using bacnet-stack library handlers */
     ESP_LOGI(TAG, "Registering BACnet service handlers");
@@ -481,25 +481,44 @@ void app_main(void)
             struct dlmstp_statistics mstp_stats = {0};
             MSTP_RS485_Preamble_Counts_Get_Reset(&preamble_55, &preamble_55ff);
             dlmstp_fill_statistics(&mstp_stats);
-            ESP_LOGI(
-                TAG,
-                "MS/TP 30s stats: rx_bytes=%lu preamble55=%lu preamble55ff=%lu pdu=%lu apdu=%lu rp=%lu wp=%lu valid=%lu invalid=%lu not_for_us=%lu bad_crc=%lu tx_frames=%lu rx_pdu=%lu poll=%lu lost_token=%lu sole_master=%d",
-                (unsigned long)rx_bytes,
-                (unsigned long)preamble_55,
-                (unsigned long)preamble_55ff,
-                (unsigned long)mstp_pdu_count,
-                (unsigned long)mstp_apdu_count,
-                (unsigned long)mstp_rp_total,
-                (unsigned long)mstp_wp_total,
-                (unsigned long)mstp_stats.receive_valid_frame_counter,
-                (unsigned long)mstp_stats.receive_invalid_frame_counter,
-                (unsigned long)mstp_stats.receive_valid_frame_not_for_us_counter,
-                (unsigned long)mstp_stats.bad_crc_counter,
-                (unsigned long)mstp_stats.transmit_frame_counter,
-                (unsigned long)mstp_stats.receive_pdu_counter,
-                (unsigned long)mstp_stats.poll_for_master_counter,
-                (unsigned long)mstp_stats.lost_token_counter,
-                dlmstp_sole_master() ? 1 : 0);
+#if !MSTP_DEBUG_ENABLE
+            (void)rx_bytes;
+            (void)preamble_55;
+            (void)preamble_55ff;
+#endif
+            if (mstp_stats.bad_crc_counter > 0 ||
+                mstp_stats.receive_invalid_frame_counter > 0 ||
+                mstp_stats.lost_token_counter > 0) {
+                ESP_LOGW(
+                    TAG,
+                    "MS/TP errors(30s): bad_crc=%lu invalid=%lu lost_token=%lu",
+                    (unsigned long)mstp_stats.bad_crc_counter,
+                    (unsigned long)mstp_stats.receive_invalid_frame_counter,
+                    (unsigned long)mstp_stats.lost_token_counter);
+            }
+#if MSTP_DEBUG_ENABLE
+            else {
+                ESP_LOGD(
+                    TAG,
+                    "MS/TP 30s stats: rx_bytes=%lu preamble55=%lu preamble55ff=%lu pdu=%lu apdu=%lu rp=%lu wp=%lu valid=%lu invalid=%lu not_for_us=%lu bad_crc=%lu tx_frames=%lu rx_pdu=%lu poll=%lu lost_token=%lu sole_master=%d",
+                    (unsigned long)rx_bytes,
+                    (unsigned long)preamble_55,
+                    (unsigned long)preamble_55ff,
+                    (unsigned long)mstp_pdu_count,
+                    (unsigned long)mstp_apdu_count,
+                    (unsigned long)mstp_rp_total,
+                    (unsigned long)mstp_wp_total,
+                    (unsigned long)mstp_stats.receive_valid_frame_counter,
+                    (unsigned long)mstp_stats.receive_invalid_frame_counter,
+                    (unsigned long)mstp_stats.receive_valid_frame_not_for_us_counter,
+                    (unsigned long)mstp_stats.bad_crc_counter,
+                    (unsigned long)mstp_stats.transmit_frame_counter,
+                    (unsigned long)mstp_stats.receive_pdu_counter,
+                    (unsigned long)mstp_stats.poll_for_master_counter,
+                    (unsigned long)mstp_stats.lost_token_counter,
+                    dlmstp_sole_master() ? 1 : 0);
+            }
+#endif
             mstp_pdu_count = 0;
             mstp_apdu_count = 0;
             mstp_rp_total = 0;
@@ -531,7 +550,10 @@ void app_main(void)
             char ip_text[20];
             wifi_ip_string_now(ip_text, sizeof(ip_text));
             display_update_values(av1, av2, av3, av4);
-            display_update_footer(USER_BACNET_DEVICE_INSTANCE, ip_text);
+            display_update_footer(
+                USER_BACNET_DEVICE_INSTANCE,
+                USER_MSTP_MAC_ADDRESS,
+                ip_text);
         }
         
         vTaskDelay(pdMS_TO_TICKS(1000));

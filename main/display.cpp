@@ -92,12 +92,20 @@ extern "C" void display_update_values(float av1, float av2, float av3, float av4
     }
 }
 
-extern "C" void display_update_footer(unsigned int bacnet_device_id, const char *ip_address)
+extern "C" void display_update_footer(
+    unsigned int bacnet_device_id,
+    unsigned int mstp_mac_address,
+    const char *ip_address)
 {
-    char footer_text[32];
+    char footer_text[40];
     (void)ip_address;
 
-    snprintf(footer_text, sizeof(footer_text), "BACnet ID: %u", bacnet_device_id);
+    snprintf(
+        footer_text,
+        sizeof(footer_text),
+        "ID: %u MAC: %u",
+        bacnet_device_id,
+        mstp_mac_address);
 
     tft.fillRect(0, FOOTER_Y, FOOTER_WIDTH, FOOTER_HEIGHT, TFT_BLACK);
     tft.setTextColor(TFT_BLUE, TFT_BLACK);

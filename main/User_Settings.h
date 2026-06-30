@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef USER_SETTINGS_PRINT_ENABLE
+#define USER_SETTINGS_PRINT_ENABLE 1
+#endif
+
 /* WiFi settings */
 extern const bool USER_ENABLE_BACNET_IP;
 extern const char USER_WIFI_SSID[];
@@ -17,6 +21,19 @@ extern const char USER_WIFI_STATIC_IP_NETMASK[];
 extern const char USER_BACNET_DEVICE_NAME[];
 extern const uint32_t USER_BACNET_DEVICE_INSTANCE;
 extern const int USER_OVERRIDE_NVS_ON_FLASH;
+
+/* BACnet device identity settings */
+extern const char USER_DEVICE_DESCRIPTION[];
+extern const char USER_DEVICE_MODEL_NAME[];
+extern const char USER_VENDOR_NAME[];
+extern const uint16_t USER_VENDOR_IDENTIFIER;
+extern const char USER_DEVICE_LOCATION[];
+extern const char USER_FIRMWARE_REVISION[];
+extern const char USER_APPLICATION_SOFTWARE_VERSION[];
+extern const char USER_DEVICE_SERIAL_NUMBER[];
+
+void User_Settings_InitDeviceIdentity(void);
+void User_Settings_Print(void);
 
 /* BBMD foreign device registration */
 extern const uint8_t USER_BBMD_IP_OCTET_1;

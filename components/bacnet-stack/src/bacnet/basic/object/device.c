@@ -356,15 +356,14 @@ bool Device_Objects_Property_List_Member(
 static uint32_t Object_Instance_Number = 260001;
 static BACNET_CHARACTER_STRING My_Object_Name;
 static BACNET_DEVICE_STATUS System_Status = STATUS_OPERATIONAL;
-static const char *Vendor_Name = BACNET_VENDOR_NAME;
+static char Vendor_Name[MAX_DEV_NAME_LEN + 1] = BACNET_VENDOR_NAME;
 static uint16_t Vendor_Identifier = BACNET_VENDOR_ID;
 static char Model_Name[MAX_DEV_MOD_LEN + 1] = "GNU";
 static char Application_Software_Version[MAX_DEV_VER_LEN + 1] = "1.0";
 static char Firmware_Version[MAX_DEV_VER_LEN + 1] = BACNET_VERSION_TEXT;
 static char Location[MAX_DEV_LOC_LEN + 1] = "USA";
 static char Description[MAX_DEV_DESC_LEN + 1] = "server";
-static char Serial_Number[MAX_DEV_DESC_LEN + 1] =
-    "BACnetDMcN56RBkeDJuNfxn3M44tfC2Y";
+static char Serial_Number[MAX_DEV_DESC_LEN + 1] = "";
 /* static uint8_t Protocol_Version = 1; - constant, not settable */
 /* static uint8_t Protocol_Revision = 4; - constant, not settable */
 /* Protocol_Services_Supported - dynamically generated */
@@ -702,6 +701,19 @@ int Device_Set_System_Status(BACNET_DEVICE_STATUS status, bool local)
 const char *Device_Vendor_Name(void)
 {
     return Vendor_Name;
+}
+
+bool Device_Set_Vendor_Name(const char *name, size_t length)
+{
+    bool status = false; /*return value */
+
+    if (length < sizeof(Vendor_Name)) {
+        memmove(Vendor_Name, name, length);
+        Vendor_Name[length] = 0;
+        status = true;
+    }
+
+    return status;
 }
 
 /** Returns the Vendor ID for this Device.

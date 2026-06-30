@@ -1,5 +1,16 @@
 #include "User_Settings.h"
+#include <string.h>
+#include <inttypes.h>
+#include "esp_log.h"
 #include "bacnet/bacenum.h"
+#include "bacnet/basic/object/device.h"
+
+static const char *TAG_USER_SETTINGS = "user_settings";
+
+static const char *user_settings_bool_text(bool value)
+{
+    return value ? "true" : "false";
+}
 
 /* WiFi settings */
 const bool USER_ENABLE_BACNET_IP = true;
@@ -14,6 +25,70 @@ const char USER_WIFI_STATIC_IP_NETMASK[] = "255.255.255.0";
 const char USER_BACNET_DEVICE_NAME[] = "ESP32_55596";
 const uint32_t USER_BACNET_DEVICE_INSTANCE = 55596;
 const int USER_OVERRIDE_NVS_ON_FLASH = 0;
+
+/* BACnet device identity settings */
+const char USER_DEVICE_DESCRIPTION[] = "ESP32 BACnet Environmental Sensor";
+const char USER_DEVICE_MODEL_NAME[] = "ESP32-WROOM32-BACnet-SEN54-ST7789";
+const char USER_VENDOR_NAME[] = "ESCAP FMS";
+const uint16_t USER_VENDOR_IDENTIFIER = 260;
+const char USER_DEVICE_LOCATION[] = "Bangkok";
+const char USER_FIRMWARE_REVISION[] = "1.3.2";
+const char USER_APPLICATION_SOFTWARE_VERSION[] = "1.0";
+const char USER_DEVICE_SERIAL_NUMBER[] = "ESP32_55596_abcdefg"; //CHANGE ME UNIQUE PER DEVICE
+
+void User_Settings_InitDeviceIdentity(void)
+{
+    Device_Set_Object_Instance_Number(USER_BACNET_DEVICE_INSTANCE);
+    Device_Object_Name_ANSI_Init(USER_BACNET_DEVICE_NAME);
+    Device_Set_Description(
+        USER_DEVICE_DESCRIPTION, strlen(USER_DEVICE_DESCRIPTION));
+    Device_Set_Model_Name(
+        USER_DEVICE_MODEL_NAME, strlen(USER_DEVICE_MODEL_NAME));
+    Device_Set_Vendor_Name(USER_VENDOR_NAME, strlen(USER_VENDOR_NAME));
+    Device_Set_Vendor_Identifier(USER_VENDOR_IDENTIFIER);
+    Device_Set_Location(USER_DEVICE_LOCATION, strlen(USER_DEVICE_LOCATION));
+    Device_Set_Firmware_Revision(
+        USER_FIRMWARE_REVISION, strlen(USER_FIRMWARE_REVISION));
+    Device_Set_Application_Software_Version(
+        USER_APPLICATION_SOFTWARE_VERSION,
+        strlen(USER_APPLICATION_SOFTWARE_VERSION));
+    Device_Serial_Number_Set(
+        USER_DEVICE_SERIAL_NUMBER,
+        strlen(USER_DEVICE_SERIAL_NUMBER));
+}
+
+void User_Settings_Print(void)
+{
+#if USER_SETTINGS_PRINT_ENABLE
+    ESP_LOGI(TAG_USER_SETTINGS, "====================================");
+    ESP_LOGI(TAG_USER_SETTINGS, "[WiFi Settings]");
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_ENABLE_BACNET_IP", user_settings_bool_text(USER_ENABLE_BACNET_IP));
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_WIFI_SSID", USER_WIFI_SSID);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_WIFI_PASS", "****");
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_WIFI_USE_STATIC_IP", user_settings_bool_text(USER_WIFI_USE_STATIC_IP));
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_WIFI_STATIC_IP_ADDR", USER_WIFI_STATIC_IP_ADDR);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_WIFI_STATIC_IP_GATEWAY", USER_WIFI_STATIC_IP_GATEWAY);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_WIFI_STATIC_IP_NETMASK", USER_WIFI_STATIC_IP_NETMASK);
+
+    ESP_LOGI(TAG_USER_SETTINGS, "====================================");
+    ESP_LOGI(TAG_USER_SETTINGS, "[BACnet Device Settings]");
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_BACNET_DEVICE_NAME", USER_BACNET_DEVICE_NAME);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %" PRIu32, "USER_BACNET_DEVICE_INSTANCE", USER_BACNET_DEVICE_INSTANCE);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %d", "USER_OVERRIDE_NVS_ON_FLASH", USER_OVERRIDE_NVS_ON_FLASH);
+
+    ESP_LOGI(TAG_USER_SETTINGS, "====================================");
+    ESP_LOGI(TAG_USER_SETTINGS, "[Device Identity Settings]");
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_DEVICE_DESCRIPTION", USER_DEVICE_DESCRIPTION);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_DEVICE_MODEL_NAME", USER_DEVICE_MODEL_NAME);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_VENDOR_NAME", USER_VENDOR_NAME);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %" PRIu16, "USER_VENDOR_IDENTIFIER", USER_VENDOR_IDENTIFIER);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_DEVICE_LOCATION", USER_DEVICE_LOCATION);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_FIRMWARE_REVISION", USER_FIRMWARE_REVISION);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_APPLICATION_SOFTWARE_VERSION", USER_APPLICATION_SOFTWARE_VERSION);
+    ESP_LOGI(TAG_USER_SETTINGS, "%-34s : %s", "USER_DEVICE_SERIAL_NUMBER", USER_DEVICE_SERIAL_NUMBER);
+    ESP_LOGI(TAG_USER_SETTINGS, "====================================");
+#endif
+}
 
 /* BBMD foreign device registration */
 const uint8_t USER_BBMD_IP_OCTET_1 = 192;

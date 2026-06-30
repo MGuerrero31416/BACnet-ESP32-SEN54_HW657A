@@ -3,6 +3,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/*
+ * Compile-time gate for verbose MS/TP RS-485 frame logging.
+ * 0 = keep only essential/critical logs (default)
+ * 1 = enable frame-level debug logs
+ */
+#ifndef MSTP_DEBUG_ENABLE
+#define MSTP_DEBUG_ENABLE 0
+#endif
+
 void MSTP_RS485_Init(void);
 void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len);
 bool MSTP_RS485_Read(uint8_t *buf);
