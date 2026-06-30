@@ -2,7 +2,7 @@
 
 ESP32 based BACnet/IP device with TFT display featuring 23 BACnet objects: 7 Analog Values, 4 Binary Values, 4 Analog Inputs, 4 Binary Inputs, and 4 Binary Outputs. Includes SEN54 air quality sensor for PM2.5/PM1.0/PM4.0/PM10, temperature, humidity, and VOC index monitoring.
 
-It can simultaneously connect the BACnet device through WiFi (BACnet/IP), WiFi to Ethernet bridge, and MS/TP (RS485 using a MAX485 module).
+It can simultaneously run BACnet/IP over WiFi and MS/TP over RS485 using a MAX485 module.
 
 You can easily add extra BACnet objects and map them to ESP32 GPIO for analog and digital inputs/outputs.
 
@@ -22,7 +22,7 @@ You can easily add extra BACnet objects and map them to ESP32 GPIO for analog an
 - **Arduino Framework**: Leverages Arduino ecosystem for easy hardware control
 - **Change of Value (COV)**: Implements BACnet COV notifications for efficient real-time updates
 - **Persistent Storage**: Attribute values modifiable from BACnet supervisor are automatically saved to ESP32 non-volatile memory (NVS) for retention across power cycles
-- **NVS Override**: When `USER_OVERRIDE_NVS_ON_FLASH=1`, NVS is erased on boot and all values reset to defaults
+- **NVS Override**: When `USER_OVERRIDE_NVS_ON_FLASH=1`, NVS is erased on boot and values reset to defaults, unless the Wi-Fi SSID is empty and the erase is skipped to preserve provisioned credentials
 - **Centralized Configuration**: User settings are centralized in [main/User_Settings.c](main/User_Settings.c)
 - **Air Quality Monitoring**: SEN54 sensor with PM2.5/PM1.0/PM4.0/PM10, temperature, humidity, and VOC/NOx index with automatic BACnet integration
 
@@ -119,6 +119,8 @@ You can easily add extra BACnet objects and map them to ESP32 GPIO for analog an
 
 ## Building
 
+On Windows, open an ESP-IDF terminal or run the ESP-IDF export script before using `idf.py`.
+
 ```bash
 cd <project-folder>
 idf.py build
@@ -209,14 +211,11 @@ Most user-configurable settings are centralized in [main/User_Settings.c](main/U
 
 | Item | Type | Display |
 |------|------|---------|
-| AV1 | Analog Value | Numeric (1 decimal) |
-| AV2 | Analog Value | Numeric (1 decimal) |
-| AV3 | Analog Value | Numeric (0 decimals) |
-| AV4 | Analog Value | Numeric (0 decimals) |
-| BV1 | Binary Value | ON/OFF + Status Dot (Blue=OFF, Green=ON) |
-| BV2 | Binary Value | ON/OFF + Status Dot (Blue=OFF, Green=ON) |
-| BV3 | Binary Value | ON/OFF + Status Dot (Blue=OFF, Green=ON) |
-| BV4 | Binary Value | ON/OFF + Status Dot (Blue=OFF, Green=ON) |
+| AV1 | Analog Value | Temp, numeric (1 decimal) |
+| AV2 | Analog Value | %HR, numeric (1 decimal) |
+| AV3 | Analog Value | PM2.5, numeric (0 decimals) |
+| AV4 | Analog Value | VOC, numeric (0 decimals) |
+| Footer | Status Text | BACnet ID and MS/TP MAC |
 
 ## BACnet Integration
 
@@ -239,7 +238,7 @@ This project uses the official bacnet-stack with the following modifications:
 - Simplified for embedded systems (reduced features, optimized for ESP32)
 - WiFi-based BACnet/IP instead of Ethernet
 
-For a list of specific changes, see [BACNET_STACK_CHANGES.md](BACNET_STACK_CHANGES.md) (if available).
+The stack is configured as a local ESP-IDF component in [components/bacnet-stack](components/bacnet-stack).
 
 ## Development Notes
 

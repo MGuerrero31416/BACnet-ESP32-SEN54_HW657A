@@ -109,3 +109,6 @@ Desktop.ini
 # Local build scripts
 build_*.bat
 *.sln.docstates # Visual Studio
+
+# Local secrets
+main/User_Settings_private.h
