@@ -18,7 +18,11 @@ static i2c_master_dev_handle_t sen54_i2c_dev = NULL;
 // 0xD304: Device Reset (hardware reset, clears all learned state)
 #define SEN54_CMD_START_MEASUREMENT  0x0021
 #define SEN54_CMD_STOP_MEASUREMENT   0x0104
+#define SEN54_CMD_START_FAN_CLEANING 0x5607
+#define SEN54_CMD_CLEAR_DEVICE_STATUS 0xD210
 #define SEN54_CMD_READ_VALUES        0x03C4
+#define SEN54_CMD_READ_DEVICE_STATUS 0xD206
+#define SEN54_CMD_AUTO_CLEANING_INTERVAL 0x8004
 // Device Reset (0xD304): forces a full hardware reset of the SEN54.
 // All internal state — including the VOC/NOx algorithm learned baselines —
 // is cleared. The sensor re-runs its start-up sequence (~1 s) and requires
@@ -26,14 +30,60 @@ static i2c_master_dev_handle_t sen54_i2c_dev = NULL;
 // Equivalent to a power-cycle. See SEN54 datasheet §3.2 "Device Reset".
 #define SEN54_CMD_RESET              0xD304
 
+#define SEN54_POWER_ON_DELAY_MS      1000
+#define SEN54_CMD_RESPONSE_DELAY_MS  5
+#define SEN54_POST_START_DELAY_MS    100
+#define SEN54_RESET_SETTLE_DELAY_MS  1200
+#define SEN54_START_RETRY_COUNT      20
+#define SEN54_MIN_TASK_INTERVAL_MS   1000
+
 // Read Measured Values returns 8 words × 3 bytes (2 data + 1 CRC) = 24 bytes
 #define SEN54_READ_VALUES_LEN  24
+#define SEN54_READ_STATUS_LEN  6
+#define SEN54_READ_AUTO_CLEANING_LEN 6
+
+static bool measurement_enabled = false;
 
 static sen54_data_t current_data = {
     .pm1_0 = -1.0f, .pm2_5 = -1.0f, .pm4_0 = -1.0f, .pm10 = -1.0f,
     .humidity = -1.0f, .temperature = -1.0f, .voc_index = -1.0f, .nox_index = -1.0f
 };
 static SemaphoreHandle_t sen54_mutex = NULL;
+
+static esp_err_t sen54_write_cmd(uint16_t cmd);
+static esp_err_t sen54_read_bytes(uint8_t *buf, size_t len);
+static esp_err_t sen54_write_cmd_u32(uint16_t cmd, uint32_t value);
+
+static bool sen54_comm_ready(void)
+{
+    if (!i2c_ready || !sen54_i2c_dev) {
+        ESP_LOGE(TAG, "[SEN54] I2C communication not ready");
+        return false;
+    }
+
+    return true;
+}
+
+static bool sen54_send_simple_command(
+    uint16_t cmd,
+    const char *success_log,
+    const char *failure_log)
+{
+    esp_err_t ret;
+
+    if (!sen54_comm_ready()) {
+        return false;
+    }
+
+    ret = sen54_write_cmd(cmd);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "%s (%s)", failure_log, esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "%s", success_log);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // CRC-8 (polynomial 0x31, init 0xFF) used by all Sensirion sensors
@@ -68,6 +118,30 @@ static esp_err_t sen54_read_bytes(uint8_t *buf, size_t len)
         return ESP_ERR_INVALID_STATE;
     }
     return i2c_master_receive(sen54_i2c_dev, buf, len, 100);
+}
+
+static esp_err_t sen54_write_cmd_u32(uint16_t cmd, uint32_t value)
+{
+    uint16_t msw = (uint16_t)(value >> 16);
+    uint16_t lsw = (uint16_t)(value & 0xFFFF);
+    uint8_t buf[8];
+
+    if (!sen54_i2c_dev) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    buf[0] = (uint8_t)(cmd >> 8);
+    buf[1] = (uint8_t)(cmd & 0xFF);
+
+    buf[2] = (uint8_t)(msw >> 8);
+    buf[3] = (uint8_t)(msw & 0xFF);
+    buf[4] = sen54_crc8(&buf[2], 2);
+
+    buf[5] = (uint8_t)(lsw >> 8);
+    buf[6] = (uint8_t)(lsw & 0xFF);
+    buf[7] = sen54_crc8(&buf[5], 2);
+
+    return i2c_master_transmit(sen54_i2c_dev, buf, sizeof(buf), 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,27 +194,25 @@ void sen54_init(void)
         i2c_ready = true;
     }
 
-    // SEN54 needs up to 1 second after power-on before it will ACK on I2C
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // SEN54 needs up to 1 second after power-on before it will ACK on I2C.
+    vTaskDelay(pdMS_TO_TICKS(SEN54_POWER_ON_DELAY_MS));
 
     // Retry start measurement — cold power-up can take several seconds.
     err = ESP_FAIL;
-    for (int attempt = 1; attempt <= 20; attempt++) {
+    for (int attempt = 1; attempt <= SEN54_START_RETRY_COUNT; attempt++) {
         err = sen54_write_cmd(SEN54_CMD_START_MEASUREMENT);
         if (err == ESP_OK) {
             ESP_LOGI(TAG, "SEN54 initialized (attempt %d), measurement started", attempt);
+            measurement_enabled = true;
 
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(SEN54_POST_START_DELAY_MS));
 
-                            sen54_data_t test_data;
-                            bool ok = sen54_read(&test_data);
-                            ESP_LOGI(TAG, "First read result = %s", ok ? "OK" : "FAILED");
+            sen54_data_t test_data;
+            bool ok = sen54_read(&test_data);
+            ESP_LOGI(TAG, "First read result = %s", ok ? "OK" : "FAILED");
 
             break;
         }
-    //    ESP_LOGW(TAG, "Start measurement attempt %d/20 failed: %s — retrying in 500 ms",
-    //             attempt, esp_err_to_name(err));
-    //    vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     if (err != ESP_OK) {
@@ -170,7 +242,7 @@ bool sen54_read(sen54_data_t *data)
     }
 
     // Sensor needs a short time to prepare the response
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(SEN54_CMD_RESPONSE_DELAY_MS));
 
     uint8_t buf[SEN54_READ_VALUES_LEN];
     err = sen54_read_bytes(buf, sizeof(buf));
@@ -207,6 +279,93 @@ bool sen54_read(sen54_data_t *data)
     return true;
 }
 
+bool sen54_read_device_status(uint32_t *status)
+{
+    if (!status) {
+        return false;
+    }
+
+    esp_err_t err = sen54_write_cmd(SEN54_CMD_READ_DEVICE_STATUS);
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    // Sensor needs a short time to prepare the response
+    vTaskDelay(pdMS_TO_TICKS(SEN54_CMD_RESPONSE_DELAY_MS));
+
+    uint8_t buf[SEN54_READ_STATUS_LEN];
+    err = sen54_read_bytes(buf, sizeof(buf));
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    uint16_t msw;
+    uint16_t lsw;
+    if (!sen54_parse_word(&buf[0], &msw) || !sen54_parse_word(&buf[3], &lsw)) {
+        ESP_LOGW(TAG, "CRC error in device status response");
+        return false;
+    }
+
+    *status = ((uint32_t)msw << 16) | lsw;
+    return true;
+}
+
+bool sen54_read_auto_cleaning_interval(uint32_t *seconds)
+{
+    if (!seconds) {
+        return false;
+    }
+
+    esp_err_t err = sen54_write_cmd(SEN54_CMD_AUTO_CLEANING_INTERVAL);
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(SEN54_CMD_RESPONSE_DELAY_MS));
+
+    uint8_t buf[SEN54_READ_AUTO_CLEANING_LEN];
+    err = sen54_read_bytes(buf, sizeof(buf));
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    uint16_t msw;
+    uint16_t lsw;
+    if (!sen54_parse_word(&buf[0], &msw) || !sen54_parse_word(&buf[3], &lsw)) {
+        ESP_LOGW(TAG, "CRC error in auto cleaning interval response");
+        return false;
+    }
+
+    *seconds = ((uint32_t)msw << 16) | lsw;
+    return true;
+}
+
+bool sen54_write_auto_cleaning_interval(uint32_t seconds)
+{
+    uint32_t verify_seconds = 0;
+
+    esp_err_t err = sen54_write_cmd_u32(SEN54_CMD_AUTO_CLEANING_INTERVAL, seconds);
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    if (!sen54_read_auto_cleaning_interval(&verify_seconds)) {
+        return false;
+    }
+
+    if (verify_seconds != seconds) {
+        ESP_LOGW(TAG,
+            "Auto cleaning interval verify failed: requested=%lu read=%lu",
+            (unsigned long)seconds,
+            (unsigned long)verify_seconds);
+        return false;
+    }
+
+    return true;
+}
+
 static void sen54_read_task(void *pvParameters)
 {
     uint32_t interval_ms = (uint32_t)(uintptr_t)pvParameters;
@@ -225,8 +384,8 @@ static void sen54_read_task(void *pvParameters)
 
 void sen54_start_task(uint32_t interval_ms)
 {
-    if (interval_ms < 1000) {
-        interval_ms = 1000;
+    if (interval_ms < SEN54_MIN_TASK_INTERVAL_MS) {
+        interval_ms = SEN54_MIN_TASK_INTERVAL_MS;
     }
     if (!sen54_mutex) {
         sen54_mutex = xSemaphoreCreateMutex();
@@ -263,20 +422,75 @@ esp_err_t sen54_full_reset(void)
     // This clears all sensor state including VOC/NOx algorithm baselines.
     // The sensor needs ~1 s to complete its start-up sequence before it
     // will ACK further commands, after which measurement is restarted.
-    esp_err_t ret = sen54_write_cmd(SEN54_CMD_RESET);
+    esp_err_t ret;
+
+    if (!sen54_comm_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ret = sen54_write_cmd(SEN54_CMD_RESET);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SEN54 full reset command failed (%d)", ret);
+        ESP_LOGE(TAG, "[SEN54] Full reset failed (%s)", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "SEN54 full reset (0xD304) sent");
-    vTaskDelay(pdMS_TO_TICKS(1200));  /* datasheet: device ready after ~1 s */
+    ESP_LOGI(TAG, "[SEN54] Full reset started");
+    vTaskDelay(pdMS_TO_TICKS(SEN54_RESET_SETTLE_DELAY_MS));  /* datasheet: device ready after ~1 s */
     ret = sen54_write_cmd(SEN54_CMD_START_MEASUREMENT);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SEN54 restart measurement after reset failed (%d)", ret);
+        ESP_LOGE(TAG, "[SEN54] Measurement restart after reset failed (%s)",
+                 esp_err_to_name(ret));
     } else {
-        ESP_LOGI(TAG, "SEN54 measurement restarted after full reset");
+        ESP_LOGI(TAG, "[SEN54] Measurement started");
+        measurement_enabled = true;
     }
     return ret;
+}
+
+bool sen54_start_measurement(void)
+{
+    if (!sen54_send_simple_command(
+            SEN54_CMD_START_MEASUREMENT,
+            "[SEN54] Measurement started",
+            "[SEN54] Measurement start failed")) {
+        return false;
+    }
+
+    measurement_enabled = true;
+    return true;
+}
+
+bool sen54_stop_measurement(void)
+{
+    if (!sen54_send_simple_command(
+            SEN54_CMD_STOP_MEASUREMENT,
+            "[SEN54] Measurement stopped",
+            "[SEN54] Measurement stop failed")) {
+        return false;
+    }
+
+    measurement_enabled = false;
+    return true;
+}
+
+bool sen54_start_fan_cleaning(void)
+{
+    return sen54_send_simple_command(
+        SEN54_CMD_START_FAN_CLEANING,
+        "[SEN54] Manual fan cleaning started",
+        "[SEN54] Manual fan cleaning command failed");
+}
+
+bool sen54_clear_device_status(void)
+{
+    return sen54_send_simple_command(
+        SEN54_CMD_CLEAR_DEVICE_STATUS,
+        "[SEN54] Device status cleared",
+        "[SEN54] Device status clear failed");
+}
+
+bool sen54_is_measurement_enabled(void)
+{
+    return measurement_enabled;
 }
 
 void sen54_get_data(sen54_data_t *data)

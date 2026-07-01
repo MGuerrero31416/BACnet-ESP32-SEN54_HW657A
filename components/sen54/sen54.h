@@ -42,6 +42,31 @@ void sen54_init(void);
 bool sen54_read(sen54_data_t *data);
 
 /**
+ * @brief Read the SEN54 Device Status register (0xD206).
+ * @param status Pointer to receive the 32-bit status value.
+ * @return true if the read succeeded and CRCs passed, false otherwise.
+ */
+bool sen54_read_device_status(uint32_t *status);
+
+/**
+ * @brief Read the SEN54 Auto Cleaning Interval register (0x8004).
+ * @param seconds Pointer to receive the interval in seconds.
+ * @return true if the read succeeded and CRCs passed, false otherwise.
+ */
+bool sen54_read_auto_cleaning_interval(uint32_t *seconds);
+
+/**
+ * @brief Write the SEN54 Auto Cleaning Interval register (0x8004).
+ *
+ * Writes the requested interval, reads it back, and verifies the value
+ * matches.
+ *
+ * @param seconds Interval in seconds.
+ * @return true if write and read-back verification succeeded, false otherwise.
+ */
+bool sen54_write_auto_cleaning_interval(uint32_t seconds);
+
+/**
  * @brief Start a background FreeRTOS task that reads the sensor periodically.
  * @param interval_ms Polling interval in milliseconds (minimum 1000).
  */
@@ -77,6 +102,36 @@ void sen54_get_data(sen54_data_t *data);
  * @return ESP_OK on success, or an esp_err_t code on I2C failure.
  */
 esp_err_t sen54_full_reset(void);
+
+/**
+ * @brief Send the Start Measurement command (0x0021) to the SEN54.
+ * @return true on success, false on I2C failure.
+ */
+bool sen54_start_measurement(void);
+
+/**
+ * @brief Send the Stop Measurement command (0x0104) to the SEN54.
+ * @return true on success, false on I2C failure.
+ */
+bool sen54_stop_measurement(void);
+
+/**
+ * @brief Send the Start Fan Cleaning command (0x5607) to the SEN54.
+ * @return true on success, false on I2C failure.
+ */
+bool sen54_start_fan_cleaning(void);
+
+/**
+ * @brief Send the Clear Device Status command (0xD210) to the SEN54.
+ * @return true on success, false on I2C failure.
+ */
+bool sen54_clear_device_status(void);
+
+/**
+ * @brief Return the current internal measurement-enabled state.
+ * @return true if measurement is active, false if stopped.
+ */
+bool sen54_is_measurement_enabled(void);
 
 #ifdef __cplusplus
 }

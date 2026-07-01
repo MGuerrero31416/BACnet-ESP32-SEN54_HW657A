@@ -31,8 +31,8 @@ const char USER_WIFI_STATIC_IP_NETMASK[] = "255.255.255.0";
 
 /* BACnet device settings */
 const char USER_BACNET_DEVICE_NAME[] = "ESP32_55596";
-const uint32_t USER_BACNET_DEVICE_INSTANCE = 55596;
-const int USER_OVERRIDE_NVS_ON_FLASH = 0;
+const uint32_t USER_BACNET_DEVICE_INSTANCE = 55596; 
+const int USER_OVERRIDE_NVS_ON_FLASH = 1; // Set to 1 to override NVS settings on flash with the defaults in User_Settings.c. Set to 0 to use NVS settings on flash if they exist.
 
 /* BACnet device identity settings */
 const char USER_DEVICE_DESCRIPTION[] = "ESP32 BACnet Environmental Sensor";
@@ -40,8 +40,8 @@ const char USER_DEVICE_MODEL_NAME[] = "ESP32-WROOM32-BACnet-SEN54-ST7789";
 const char USER_VENDOR_NAME[] = "ESCAP FMS";
 const uint16_t USER_VENDOR_IDENTIFIER = 260;
 const char USER_DEVICE_LOCATION[] = "Bangkok";
-const char USER_FIRMWARE_REVISION[] = "1.3.2";
-const char USER_APPLICATION_SOFTWARE_VERSION[] = "1.0";
+const char USER_FIRMWARE_REVISION[] = "1.4.0";
+const char USER_APPLICATION_SOFTWARE_VERSION[] = "1.4";
 const char USER_DEVICE_SERIAL_NUMBER[] = "ESP32_55596_abcdefg"; //CHANGE ME UNIQUE PER DEVICE
 
 void User_Settings_InitDeviceIdentity(void)
@@ -123,7 +123,7 @@ const char *USER_AV_NAMES[USER_AV_COUNT] = {
     "VOC Index",
     "PM1.0",
     "PM4",
-    "PM10"
+    "SEN54 Auto Cleaning Interval"
 };
 const char *USER_AV_DESCRIPTIONS[USER_AV_COUNT] = {
     "Temperature",
@@ -132,7 +132,7 @@ const char *USER_AV_DESCRIPTIONS[USER_AV_COUNT] = {
     "VOC Index",
     "PM1.0",
     "PM4.0",
-    "PM10"
+    "Automatic fan cleaning interval (seconds)"
 };
 const uint16_t USER_AV_UNITS[USER_AV_COUNT] = {
     UNITS_DEGREES_CELSIUS,
@@ -141,7 +141,7 @@ const uint16_t USER_AV_UNITS[USER_AV_COUNT] = {
     UNITS_NO_UNITS,
     UNITS_MICROGRAMS_PER_CUBIC_METER,
     UNITS_MICROGRAMS_PER_CUBIC_METER,
-    UNITS_MICROGRAMS_PER_CUBIC_METER
+    UNITS_SECONDS
 };
 const float USER_AV_INITIAL_VALUES[USER_AV_COUNT] = {
     0.0f,
@@ -165,32 +165,32 @@ const float USER_AV_COV_INCREMENTS[USER_AV_COUNT] = {
 const uint32_t USER_BV_INSTANCES[USER_BV_COUNT] = { 1, 2, 3, 4 };
 const char *USER_BV_NAMES[USER_BV_COUNT] = {
     "SEN54_Full_Reset",
-    "BV2",
-    "BV3",
-    "BV4"
+    "SEN54 Measurement Enable",
+    "SEN54 Fan Cleaning",
+    "SEN54 Clear Device Status"
 };
 const char *USER_BV_DESCRIPTIONS[USER_BV_COUNT] = {
     "Write ACTIVE to send I2C reset (0xD304) to SEN54",
-    "Binary Value 2",
-    "Binary Value 3",
-    "Binary Value 4"
+    "Enable or disable continuous SEN54 measurements.",
+    "Start one manual SEN54 fan cleaning cycle.",
+    "Clear SEN54 sticky diagnostic status flags."
 };
 const char *USER_BV_ACTIVE_TEXT[USER_BV_COUNT] = {
     "RESETTING",
-    "ACTIVE",
-    "ACTIVE",
-    "ACTIVE"
+    "Enabled",
+    "Start",
+    "Clear"
 };
 const char *USER_BV_INACTIVE_TEXT[USER_BV_COUNT] = {
     "IDLE",
-    "INACTIVE",
-    "INACTIVE",
-    "INACTIVE"
+    "Stopped",
+    "Idle",
+    "Idle"
 };
 const uint8_t USER_BV_INITIAL_VALUES[USER_BV_COUNT] = {
     BINARY_INACTIVE,
     BINARY_INACTIVE,
-    BINARY_ACTIVE,
+    BINARY_INACTIVE,
     BINARY_INACTIVE
 };
 
@@ -228,16 +228,16 @@ const float USER_AI_COV_INCREMENTS[USER_AI_COUNT] = {
 
 const uint32_t USER_BI_INSTANCES[USER_BI_COUNT] = { 1, 2, 3, 4 };
 const char *USER_BI_NAMES[USER_BI_COUNT] = {
-    "BI1",
-    "BI2",
-    "BI3",
-    "BI4"
+    "SEN54 Fan Failure",
+    "SEN54 Laser Error",
+    "SEN54 VOC Sensor Error",
+    "SEN54 RHT Sensor Error"
 };
 const char *USER_BI_DESCRIPTIONS[USER_BI_COUNT] = {
-    "Binary Input 1",
-    "Binary Input 2",
-    "Binary Input 3",
-    "Binary Input 4"
+    "SEN54 Fan Failure",
+    "SEN54 Laser Error",
+    "SEN54 VOC Sensor Error",
+    "SEN54 RHT Sensor Error"
 };
 const char *USER_BI_ACTIVE_TEXT[USER_BI_COUNT] = {
     "ACTIVE",

@@ -70,6 +70,18 @@ void bacnet_nvs_save_bv_pv(uint32_t instance, uint8_t value) {
     nvs_handle_t nvs_handle;
     char key[32];
     esp_err_t err;
+
+    /* BV2 (SEN54 Measurement Enable) is a runtime operating command only.
+     * It is intentionally not persisted across reboots: this device is
+     * designed for continuous environmental monitoring and shall always
+     * restart in measurement-enabled state regardless of the last command. */
+    /* BV3 (SEN54 Fan Cleaning) and BV4 (SEN54 Clear Device Status) are also
+     * command-only and momentary, so they must never be restored from
+     * persistent state. */
+    if (instance == 2 || instance == 3 || instance == 4) {
+        return;
+    }
+
     snprintf(key, sizeof(key), "binary_%lu_val", (unsigned long)instance);
     if ((err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle)) == ESP_OK) {
         if ((err = nvs_set_u8(nvs_handle, key, value)) == ESP_OK) {
@@ -135,8 +147,11 @@ void bacnet_create_binary_values(void) {
         Binary_Value_Reliability_Set(instance, RELIABILITY_NO_FAULT_DETECTED);
         Binary_Value_Out_Of_Service_Set(instance, false);
         Binary_Value_Write_Enable(instance);
-        /* Load persisted values from NVS (if any) - unless override flag is set */
-        if (!override_nvs_on_flash) {
+        /* Load persisted values from NVS (if any) - unless override flag is set.
+         * BV2 (SEN54 Measurement Enable) is excluded: it is not persistent and
+         * shall always boot into INACTIVE here; the sensor task sets it ACTIVE
+         * after a successful initialization. */
+        if (!override_nvs_on_flash && instance != 2 && instance != 3 && instance != 4) {
             bacnet_nvs_load_bv(instance);
         }
     }

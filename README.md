@@ -1,31 +1,76 @@
-# ESP32 WROOM-32 ~ SEN54 Air Quality Monitor ~ BACnet IP & MS/TP ~ Display 1.14" ST7789 170x320
+# ESP32 BACnet/IP & MS/TP Air Quality Monitor (SEN54 + ST7789)
 
-ESP32 based BACnet/IP device with TFT display featuring 23 BACnet objects: 7 Analog Values, 4 Binary Values, 4 Analog Inputs, 4 Binary Inputs, and 4 Binary Outputs. Includes SEN54 air quality sensor for PM2.5/PM1.0/PM4.0/PM10, temperature, humidity, and VOC index monitoring.
+**Current firmware:** v1.4.0
 
-It can simultaneously run BACnet/IP over WiFi and MS/TP over RS485 using a MAX485 module.
+ESP32-based BACnet/IP and BACnet MS/TP air quality monitor using the Sensirion SEN54 and a 1.9" 170×320 ST7789 TFT display.
 
-You can easily add extra BACnet objects and map them to ESP32 GPIO for analog and digital inputs/outputs.
+The device simultaneously supports BACnet/IP (Wi-Fi) and BACnet MS/TP (RS-485), exposing real-time air quality measurements, diagnostics, and maintenance controls as standard BACnet objects.
+
+In addition to being a complete air quality monitor, this project serves as a flexible ESP32 BACnet template for custom sensors, GPIO expansion, and building automation applications.
+
+## Highlights
+
+- Dual BACnet/IP and BACnet MS/TP operation
+- Sensirion SEN54 air quality sensor
+- 24 BACnet objects (1 Device object + 23 application objects)
+- Real-time ST7789 TFT display
+- BACnet Change of Value (COV) support
+- NVS persistence for configurable BACnet objects
+- BACnet maintenance and diagnostic objects for the SEN54
+- ESP-IDF 5.5 with Arduino as a component
+- Easily extensible for additional BACnet objects and hardware
 
 ## Features
 
-- **BACnet/IP Protocol**: Full BACnet/IP stack implementation
-- **BACnet MS/TP**: RS485 MS/TP support alongside BACnet/IP (dual stack)
-- **Live Display**: Real-time monitoring of BACnet objects on 170x320 TFT display
-- **23 BACnet Objects**:
-  - 7 Analog Values (AV1-7) - read/write with COV and NVS persistence
-  - 4 Binary Values (BV1-4) - read/write with COV and NVS persistence
-  - 4 Analog Inputs (AI1-4) - sensor inputs with COV and NVS persistence
-  - 4 Binary Inputs (BI1-4) - binary states with COV and NVS persistence
-  - 4 Binary Outputs (BO1-4) - writable control outputs with COV and NVS persistence
-- **Writable Metadata**: Object `Name` and `Description` are writable for AV/BV/AI/BI/BO
-- **WiFi Connectivity**: ESP32 with built-in WiFi for BACnet/IP communication
-- **Arduino Framework**: Leverages Arduino ecosystem for easy hardware control
-- **Change of Value (COV)**: Implements BACnet COV notifications for efficient real-time updates
-- **Persistent Storage**: Attribute values modifiable from BACnet supervisor are automatically saved to ESP32 non-volatile memory (NVS) for retention across power cycles
-- **NVS Override**: When `USER_OVERRIDE_NVS_ON_FLASH=1`, NVS is erased on boot and values reset to defaults, unless the Wi-Fi SSID is empty and the erase is skipped to preserve provisioned credentials
-- **Centralized Configuration**: User settings are centralized in [main/User_Settings.c](main/User_Settings.c)
-- **Air Quality Monitoring**: SEN54 sensor with PM2.5/PM1.0/PM4.0/PM10, temperature, humidity, and VOC/NOx index with automatic BACnet integration
+- **BACnet/IP Protocol** – Full BACnet/IP implementation over Wi-Fi
+- **BACnet MS/TP** – RS-485 MS/TP support running simultaneously with BACnet/IP
+- **Live Display** – Real-time display of selected BACnet object values on a 170×320 ST7789 TFT
+- **24 BACnet Objects**
+  - 1 Device object
+  - 7 Analog Values (AV1–AV7)
+  - 4 Binary Values (BV1–BV4)
+  - 4 Analog Inputs (AI1–AI4)
+  - 4 Binary Inputs (BI1–BI4)
+  - 4 Binary Outputs (BO1–BO4)
+- **Writable Metadata** – BACnet `Object Name` and `Description` are writable for AV, AI, BV, BI, and BO objects
+- **BACnet Change of Value (COV)** – Efficient real-time notifications
+- **Persistent Storage** – BACnet-configurable values are automatically stored in ESP32 Non-Volatile Storage (NVS)
+- **NVS Override** – Setting `USER_OVERRIDE_NVS_ON_FLASH=1` restores factory defaults while preserving Wi-Fi credentials when appropriate
+- **Centralized Configuration** – Most project settings are defined in [main/User_Settings.c](main/User_Settings.c)
+- **ESP32 Wi-Fi** – Built-in Wi-Fi for BACnet/IP communication
+- **Arduino Framework** – Uses Arduino as an ESP-IDF component
 
+### SEN54 Integration
+
+The integrated Sensirion SEN54 driver provides:
+
+- Continuous PM1.0, PM2.5, PM4.0 and PM10 measurements
+- Temperature and relative humidity measurements
+- VOC Index measurement
+- CRC-8 validation on all I²C communications
+- Automatic sensor disconnect detection
+- Thread-safe FreeRTOS implementation
+- BACnet-integrated maintenance commands
+- BACnet-integrated diagnostic status
+
+### BACnet Maintenance Objects
+
+| Object | Function |
+|---------|----------|
+| BV1 | Full sensor reset |
+| BV2 | Enable/disable measurements |
+| BV3 | Start manual fan cleaning |
+| BV4 | Clear device status flags |
+| AV7 | Read/write automatic fan cleaning interval |
+
+### BACnet Diagnostic Objects
+
+| Object | Status |
+|---------|--------|
+| BI1 | Fan failure |
+| BI2 | Laser error |
+| BI3 | VOC sensor error |
+| BI4 | RHT sensor error |
 
 ## Photos
 ![Device](docs/images/01.jpg)
@@ -36,109 +81,125 @@ You can easily add extra BACnet objects and map them to ESP32 GPIO for analog an
 
 ## Hardware Requirements
 
-- **Microcontroller**: ESP32-WROOM-32 (https://shopee.co.th/product/1236634894/55101222134)
-- **Display**: ST7789 SPI TFT (170x320 panel, rotation 1 used)
-- **Display Connections**:
-  - MOSI (SDA): GPIO 23
-  - SCLK (SCL): GPIO 18
-  - CS: GPIO 15
-  - DC: GPIO 2
-  - RST: GPIO 4
-  - BL (Backlight): GPIO 32
+- **Development Board:** ESP32-WROOM-32 DevKit (or compatible ESP32 module)
+- **Display:** ST7789 SPI TFT (170×320 pixels)
+- **Air Quality Sensor:** Sensirion SEN54
+- **RS-485 Transceiver:** MAX485 (or compatible)
 
 ## Hardware Components
 
 ### ST7789 TFT Display
-- **Resolution**: 170x320 pixels
-- **Driver**: TFT_eSPI with custom ST7789 setup
 
-### SEN54 Air Quality Sensor
-- **Model**: Sensirion SEN54
-- **Communication**: I2C (address 0x69, 100 kHz)
-- **Connections**:
-  - SDA → ESP32 GPIO13
-  - SCL → ESP32 GPIO14
-  - Power: 3.3V or 5V
-  - GND: ESP32 GND
-- **Measurements**:
-  - PM1.0, PM2.5, PM4.0, PM10 (µg/m³)
-  - Temperature (°C) → mapped to **Analog Value 1**
-  - Relative Humidity (%RH) → mapped to **Analog Value 2**
-  - PM2.5 → mapped to **Analog Value 3**
-  - VOC Index (1–500) → mapped to **Analog Value 4**
-  - PM1.0 → mapped to **Analog Value 5**
-  - PM4.0 → mapped to **Analog Value 6**
-  - PM10 → mapped to **Analog Value 7**
-  - NOx Index (1–500, available via API)
-- **BACnet Mapping**: Modify `sen54_task` in [main/main.c](main/main.c) to change which measurements map to which AV objects.
-- **Update Frequency**: 2-second intervals
-- **Features**:
-  - CRC-8 validation on all I2C responses (Sensirion polynomial 0x31)
-  - Sensor disconnect detection with BACnet error indication (-1 value)
-  - Thread-safe FreeRTOS mutex-protected data
+- Resolution: 170×320 pixels
+- Driver: TFT_eSPI
+- Display rotation: 1
 
-### WiFi Connectivity
-- Built-in ESP32 WiFi for BACnet/IP communication
-- Configured via [main/User_Settings.c](main/User_Settings.c)
-- Set your SSID/password in [main/User_Settings.c](main/User_Settings.c) for your environment
-- Static IP option in [main/User_Settings.c](main/User_Settings.c). Set `USER_WIFI_USE_STATIC_IP` to 1 or 0
+#### Connections
 
-### BACnet MS/TP (RS485)
-- **Transceiver**: MAX485 or equivalent RS485 converter
-- **UART**: UART2
-- **Connections**:
-  - DE/RE → ESP32 GPIO5
-  - DI (TX) → ESP32 GPIO16
-  - RO (RX) → ESP32 GPIO17
-- **Baud Rate**: 38400 (default)
-- **MS/TP Settings**: MAC 21, Max Master 127, Max Info Frames 80
-- **Discovery**: Some controllers (e.g., NAE) require manual add on the MS/TP field bus
+| Display Pin | ESP32 GPIO |
+|-------------|-----------:|
+| MOSI | GPIO23 |
+| SCLK | GPIO18 |
+| CS | GPIO15 |
+| DC | GPIO2 |
+| RST | GPIO4 |
+| Backlight | GPIO32 |
+
+### Sensirion SEN54 Air Quality Sensor
+
+- Communication: I²C (100 kHz, address `0x69`)
+- Supply Voltage: 3.3 V or 5 V
+
+#### Connections
+
+| SEN54 Pin | ESP32 GPIO |
+|-----------|-----------:|
+| SDA | GPIO13 |
+| SCL | GPIO14 |
+| VCC | 3.3 V or 5 V |
+| GND | GND |
+
+### Default BACnet Mapping
+
+| BACnet Object | Measurement |
+|---------------|-------------|
+| AV1 | Temperature (°C) |
+| AV2 | Relative Humidity (%RH) |
+| AV3 | PM2.5 (µg/m³) |
+| AV4 | VOC Index |
+| AV5 | PM1.0 (µg/m³) |
+| AV6 | PM4.0 (µg/m³) |
+| AV7 | Automatic Fan Cleaning Interval (seconds) |
+
+> **Note**
+>
+> By default, SEN54 measurements are mapped to **Analog Value** objects rather than **Analog Input** objects. This makes it easy to remap sensors, simulate values during testing, or replace the data source without changing the BACnet object database.
+
+PM10 and NOx Index are supported by the SEN54 driver and can be mapped to BACnet objects if required.
+
+### SEN54 Features
+
+- Continuous measurement every 2 seconds
+- Device status polling every 5 seconds
+- CRC-8 validation (Sensirion polynomial `0x31`)
+- Thread-safe FreeRTOS mutex protection
+- Automatic sensor disconnect detection
+- Full sensor reset (`0xD304`)
+- Manual fan cleaning (`0x5607`)
+- Clear device status (`0xD210`)
+- Read/write automatic fan cleaning interval (`0x8004`)
+
+The default BACnet mapping can be modified by editing `sen54_task()` in [main/main.c](main/main.c).
+
+### Wi-Fi Connectivity
+
+- Built-in ESP32 Wi-Fi
+- BACnet/IP communication
+- Configured in [main/User_Settings.c](main/User_Settings.c)
+- Optional static IP support using `USER_WIFI_USE_STATIC_IP`
+
+### BACnet MS/TP (RS-485)
+
+- Transceiver: MAX485 (or compatible)
+- UART: UART2
+- Default baud rate: **38400**
+- Default MAC Address: **96**
+- Default Max Master: **127**
+- Default Max Info Frames: **80**
+
+#### Connections
+
+| MAX485 Pin | ESP32 GPIO |
+|------------|-----------:|
+| DE/RE | GPIO5 |
+| DI (TX) | GPIO16 |
+| RO (RX) | GPIO17 |
+
+> **Note**
+>
+> Some BACnet MS/TP supervisors (such as Johnson Controls NAE) require devices to be added manually to the MS/TP field bus.
 
 ## GPIO Summary
 
-| Pin     | Component   | Signal              | Definition |
-|---------|-------------|---------------------|------------|
-| GPIO 13 | SEN54       | SDA (I2C Data)      | [components/sen54/sen54.h](components/sen54/sen54.h)
-| GPIO 14 | SEN54       | SCL (I2C Clock)     | [components/sen54/sen54.h](components/sen54/sen54.h)
-| GPIO 2  | TFT Display | DC (Data/Command)   | [components/TFT_eSPI/User_Setup.h](components/TFT_eSPI/User_Setup.h)
-| GPIO 4  | TFT Display | RST (Reset)         | [components/TFT_eSPI/User_Setup.h](components/TFT_eSPI/User_Setup.h)
-| GPIO 15 | TFT Display | CS (Chip Select)    | [components/TFT_eSPI/User_Setup.h](components/TFT_eSPI/User_Setup.h)
-| GPIO 18 | TFT Display | SCLK (SPI Clock)    | [components/TFT_eSPI/User_Setup.h](components/TFT_eSPI/User_Setup.h)
-| GPIO 23 | TFT Display | MOSI SDA (SPI Data) | [components/TFT_eSPI/User_Setup.h](components/TFT_eSPI/User_Setup.h)
-| GPIO 32 | TFT Display | BACKLIGHT           | [components/TFT_eSPI/User_Setup.h](components/TFT_eSPI/User_Setup.h)
-| GPIO 5  | MAX485      | DE/RE               | [main/mstp_rs485.c](main/mstp_rs485.c)
-| GPIO 16 | MAX485      | DI (TX)             | [main/mstp_rs485.c](main/mstp_rs485.c)
-| GPIO 17 | MAX485      | RO (RX)             | [main/mstp_rs485.c](main/mstp_rs485.c)
-
+| GPIO | Component | Signal |
+|------|-----------|--------|
+| GPIO13 | SEN54 | SDA |
+| GPIO14 | SEN54 | SCL |
+| GPIO2 | ST7789 | DC |
+| GPIO4 | ST7789 | Reset |
+| GPIO15 | ST7789 | Chip Select |
+| GPIO18 | ST7789 | SPI Clock |
+| GPIO23 | ST7789 | SPI MOSI |
+| GPIO32 | ST7789 | Backlight |
+| GPIO5 | MAX485 | DE / RE |
+| GPIO16 | MAX485 | UART TX |
+| GPIO17 | MAX485 | UART RX |
 
 ## Build Requirements
 
-- ESP-IDF v5.5.x
-- Python 3.11+
-- xtensa-esp-elf toolchain
-
-## Building
-
-On Windows, open an ESP-IDF terminal or run the ESP-IDF export script before using `idf.py`.
-
-```bash
-cd <project-folder>
-idf.py build
-```
-
-## Flashing
-
-```bash
-idf.py flash -p COM3
-```
-
-Or use the provided build/flash tasks in VS Code.
-
-## Monitoring Serial Output
-
-```bash
-idf.py monitor -p COM3
-```
+- **ESP-IDF:** v5.5.x
+- **Python:** 3.11+
+- **Toolchain:** xtensa-esp-elf (ESP32)
 
 ## Configuration
 
@@ -186,7 +247,7 @@ Most user-configurable settings are centralized in [main/User_Settings.c](main/U
 
 ### Sensor Data Mapping
 
-- **SEN54 Parameters**: Select which sensor measurement (PM1.0, PM2.5, PM4.0, PM10, temperature, humidity, VOC index, or NOx index) to map to each Analog Value object in [main/main.c](main/main.c) — look for the `sen54_task()` function. Current default mapping: AV1=Temperature, AV2=Humidity, AV3=PM2.5, AV4=VOC Index, AV5=PM1.0, AV6=PM4.0, AV7=PM10.
+- **SEN54 Parameters**: Select which sensor measurement (PM1.0, PM2.5, PM4.0, PM10, temperature, humidity, VOC index, or NOx index) to map to each Analog Value object in [main/main.c](main/main.c) — look for the `sen54_task()` function. Current default mapping: AV1=Temperature, AV2=Humidity, AV3=PM2.5, AV4=VOC Index, AV5=PM1.0, AV6=PM4.0, AV7=Auto Cleaning Interval (seconds).
 
 ## Architecture
 
@@ -223,7 +284,7 @@ The device broadcasts its Device ID and manages BACnet objects that can be read/
 
 ### BACnet Objects Exposed
 
-- **Device**: 55501 (configurable in [main/User_Settings.c](main/User_Settings.c))
+- **Device**: 55596 (configurable in [main/User_Settings.c](main/User_Settings.c))
 - **Analog Values**: Instance 1, 2, 3, 4, 5, 6, 7
 - **Binary Values**: Instance 1, 2, 3, 4
 - **Analog Inputs**: Instance 1, 2, 3, 4
