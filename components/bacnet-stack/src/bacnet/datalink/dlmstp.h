@@ -29,7 +29,9 @@ typedef struct dlmstp_packet {
     bool ready; /* true if ready to be sent or received */
     BACNET_ADDRESS address; /* source address */
     uint8_t frame_type; /* type of message */
+    uint8_t source_tag; /* source/category for diagnostics */
     uint16_t pdu_len; /* packet length */
+    uint32_t queued_ms; /* queue timestamp (milliseconds) */
     uint8_t pdu[DLMSTP_MPDU_MAX]; /* packet */
 } DLMSTP_PACKET;
 
@@ -45,6 +47,24 @@ typedef struct dlmstp_statistics {
     uint32_t bad_crc_counter;
     uint32_t poll_for_master_counter;
 } DLMSTP_STATISTICS;
+
+typedef enum {
+    DLMSTP_SEND_STATUS_OK = 0,
+    DLMSTP_SEND_STATUS_NO_PORT,
+    DLMSTP_SEND_STATUS_NO_USER,
+    DLMSTP_SEND_STATUS_INVALID_DESTINATION,
+    DLMSTP_SEND_STATUS_PDU_TOO_LARGE,
+    DLMSTP_SEND_STATUS_QUEUE_FULL,
+    DLMSTP_SEND_STATUS_NOT_ALLOWED_STATE,
+    DLMSTP_SEND_STATUS_OTHER
+} DLMSTP_SEND_STATUS;
+
+typedef enum {
+    DLMSTP_TX_SOURCE_OTHER = 0,
+    DLMSTP_TX_SOURCE_I_AM,
+    DLMSTP_TX_SOURCE_FINAL_ACK,
+    DLMSTP_TX_SOURCE_COV
+} DLMSTP_TX_SOURCE;
 
 #ifndef DLMSTP_MAX_INFO_FRAMES
 #define DLMSTP_MAX_INFO_FRAMES DEFAULT_MAX_INFO_FRAMES
@@ -213,6 +233,23 @@ BACNET_STACK_EXPORT
 bool dlmstp_send_pdu_queue_empty(void);
 BACNET_STACK_EXPORT
 bool dlmstp_send_pdu_queue_full(void);
+BACNET_STACK_EXPORT
+unsigned dlmstp_send_pdu_queue_depth(void);
+BACNET_STACK_EXPORT
+bool dlmstp_send_pdu_queue_drop_source(DLMSTP_TX_SOURCE source);
+BACNET_STACK_EXPORT
+bool dlmstp_token_held(void);
+BACNET_STACK_EXPORT
+bool dlmstp_can_transmit_now(void);
+
+BACNET_STACK_EXPORT
+DLMSTP_SEND_STATUS dlmstp_send_status_last(void);
+BACNET_STACK_EXPORT
+const char *dlmstp_send_status_text(DLMSTP_SEND_STATUS status);
+BACNET_STACK_EXPORT
+const char *dlmstp_tx_source_text(DLMSTP_TX_SOURCE source);
+BACNET_STACK_EXPORT
+bool dlmstp_send_reply_postponed(uint8_t destination_mac);
 
 BACNET_STACK_EXPORT
 uint8_t dlmstp_max_info_frames_limit(void);

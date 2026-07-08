@@ -8,6 +8,14 @@
 #define USER_SETTINGS_PRINT_ENABLE 1
 #endif
 
+#ifndef USER_BACNET_ROUTED_COMPAT_MODE
+#define USER_BACNET_ROUTED_COMPAT_MODE 0
+#endif
+
+#ifndef USER_BACNET_ROUTED_COMPAT_MAX_APDU
+#define USER_BACNET_ROUTED_COMPAT_MAX_APDU 128U
+#endif
+
 /* WiFi settings */
 extern const bool USER_ENABLE_BACNET_IP;
 extern const char USER_WIFI_SSID[];
@@ -50,6 +58,8 @@ extern const uint8_t USER_MSTP_MAX_INFO_FRAMES;
 extern const uint8_t USER_MSTP_MAX_MASTER;
 extern const uint32_t USER_MSTP_BAUD_RATE;
 extern const bool USER_MSTP_AUTO_BAUD;
+extern const uint16_t USER_BACNET_MSTP_MAX_APDU;
+extern const bool USER_MSTP_ENABLE_REPLY_POSTPONED;
 
 /* BACnet object defaults */
 #define USER_AV_COUNT 7

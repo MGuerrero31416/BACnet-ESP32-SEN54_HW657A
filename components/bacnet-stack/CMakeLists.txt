@@ -68,4 +68,5 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     BACDL_BIP=1
     BACDL_MSTP=1
     BACDL_MULTIPLE=1
+    DLMSTP_MAX_INFO_FRAMES=4
 )

@@ -216,6 +216,13 @@ BACNET_STACK_EXPORT
 bool Device_Reinitialize_Password_Set(const char *password);
 
 BACNET_STACK_EXPORT
+void Device_Object_List_Debug_Request_Context_Set(
+    uint8_t invoke_id,
+    uint16_t requester_max_apdu);
+BACNET_STACK_EXPORT
+void Device_Object_List_Debug_Request_Context_Clear(void);
+
+BACNET_STACK_EXPORT
 rr_info_function Device_Objects_RR_Info(BACNET_OBJECT_TYPE object_type);
 
 BACNET_STACK_EXPORT
@@ -374,6 +381,10 @@ BACNET_STACK_EXPORT
 uint8_t Device_Protocol_Revision(void);
 BACNET_STACK_EXPORT
 BACNET_SEGMENTATION Device_Segmentation_Supported(void);
+BACNET_STACK_EXPORT
+uint16_t Device_Max_APDU_Accepted(void);
+BACNET_STACK_EXPORT
+void Device_Set_Max_APDU_Accepted(uint16_t max_apdu);
 
 BACNET_STACK_EXPORT
 uint32_t Device_Database_Revision(void);

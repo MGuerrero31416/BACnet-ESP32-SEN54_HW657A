@@ -13,10 +13,12 @@
 #include <stdint.h>
 #include <string.h> /* for memmove */
 #include <time.h> /* for timezone, localtime */
+#include "esp_log.h"
 #include "bacnet/datalink/datalink.h"
 #include "bacnet/bacdef.h"
 #include "bacnet/bacdcode.h"
 #include "bacnet/bacenum.h"
+#include "bacnet/bactext.h"
 #include "bacnet/bacapp.h"
 #include "bacnet/config.h" /* the custom stuff */
 #include "bacnet/apdu.h"
@@ -47,6 +49,82 @@
 /* Not included in time.h as specified by The Open Group */
 /* Difference from UTC and local standard time */
 long int timezone;
+
+#ifndef OBJECT_LIST_DEBUG
+#define OBJECT_LIST_DEBUG 0
+#endif
+
+#if OBJECT_LIST_DEBUG
+static const char *OBJECT_LIST_DEBUG_TAG = "obj_list_dbg";
+
+struct object_list_debug_request_context {
+    bool active;
+    uint8_t invoke_id;
+    uint16_t requester_max_apdu;
+};
+
+static struct object_list_debug_request_context Object_List_Debug_Context = {
+    false, 0, 0
+};
+
+static const char *object_list_debug_result_name(int apdu_len)
+{
+    if (apdu_len >= 0) {
+        return "ACK";
+    }
+    if (apdu_len == BACNET_STATUS_ABORT) {
+        return "Abort";
+    }
+    if (apdu_len == BACNET_STATUS_ERROR) {
+        return "Error";
+    }
+    if (apdu_len == BACNET_STATUS_REJECT) {
+        return "Reject";
+    }
+
+    return "Unknown";
+}
+
+static const char *object_list_debug_request_kind(uint32_t array_index)
+{
+    if (array_index == BACNET_ARRAY_ALL) {
+        return "entire-array";
+    }
+    if (array_index == 0) {
+        return "element-count";
+    }
+
+    return "individual-entry";
+}
+
+void Device_Object_List_Debug_Request_Context_Set(
+    uint8_t invoke_id,
+    uint16_t requester_max_apdu)
+{
+    Object_List_Debug_Context.active = true;
+    Object_List_Debug_Context.invoke_id = invoke_id;
+    Object_List_Debug_Context.requester_max_apdu = requester_max_apdu;
+}
+
+void Device_Object_List_Debug_Request_Context_Clear(void)
+{
+    Object_List_Debug_Context.active = false;
+    Object_List_Debug_Context.invoke_id = 0;
+    Object_List_Debug_Context.requester_max_apdu = 0;
+}
+#else
+void Device_Object_List_Debug_Request_Context_Set(
+    uint8_t invoke_id,
+    uint16_t requester_max_apdu)
+{
+    (void)invoke_id;
+    (void)requester_max_apdu;
+}
+
+void Device_Object_List_Debug_Request_Context_Clear(void)
+{
+}
+#endif
 
 /* local forward (semi-private) and external prototypes */
 int Device_Read_Property_Local(BACNET_READ_PROPERTY_DATA *rpdata);
@@ -1046,9 +1124,43 @@ int Device_Read_Property_Local(BACNET_READ_PROPERTY_DATA *rpdata)
             break;
         case PROP_OBJECT_LIST:
             count = Device_Object_List_Count();
+#if OBJECT_LIST_DEBUG
+            ESP_LOGI(
+                OBJECT_LIST_DEBUG_TAG,
+                "OBJECT_LIST request device_instance=%lu invoke_id=%s array_index=%lu kind=%s requester_max_apdu=%s max_apdu_accepted=%u",
+                (unsigned long)Object_Instance_Number,
+                Object_List_Debug_Context.active ? "available" : "unavailable",
+                (unsigned long)rpdata->array_index,
+                object_list_debug_request_kind(rpdata->array_index),
+                Object_List_Debug_Context.active ? "available" : "unavailable",
+                (unsigned)MAX_APDU,
+                (unsigned)apdu_max);
+            if (Object_List_Debug_Context.active) {
+                ESP_LOGI(
+                    OBJECT_LIST_DEBUG_TAG,
+                    "OBJECT_LIST request-context invoke_id=%u requester_max_apdu=%u",
+                    (unsigned)Object_List_Debug_Context.invoke_id,
+                    (unsigned)Object_List_Debug_Context.requester_max_apdu);
+            }
+            ESP_LOGI(
+                OBJECT_LIST_DEBUG_TAG,
+                "OBJECT_LIST before-encode total_object_count=%lu requested_array_index=%lu apdu_buf_size=%u remaining_apdu_space=%u current_apdu_len=%d",
+                (unsigned long)count,
+                (unsigned long)rpdata->array_index,
+                (unsigned)apdu_max,
+                (unsigned)(apdu_max - apdu_len),
+                apdu_len);
+#endif
             /* Array element zero is the number of objects in the list */
-            if (rpdata->array_index == 0)
+            if (rpdata->array_index == 0) {
                 apdu_len = encode_application_unsigned(&apdu[0], count);
+#if OBJECT_LIST_DEBUG
+                ESP_LOGI(
+                    OBJECT_LIST_DEBUG_TAG,
+                    "OBJECT_LIST array=0 Returning object count = %lu",
+                    (unsigned long)count);
+#endif
+            }
             /* if no index was specified, then try to encode the entire list */
             /* into one packet.  Note that more than likely you will have */
             /* to return an error if the number of encoded objects exceeds */
@@ -1079,18 +1191,60 @@ int Device_Read_Property_Local(BACNET_READ_PROPERTY_DATA *rpdata)
                         break;
                     }
                 }
+#if OBJECT_LIST_DEBUG
+                if (apdu_len >= 0) {
+                    ESP_LOGI(
+                        OBJECT_LIST_DEBUG_TAG,
+                        "OBJECT_LIST array=ALL encoded entries=%lu",
+                        (unsigned long)count);
+                }
+#endif
             } else {
                 found = Device_Object_List_Identifier(
                     rpdata->array_index, &object_type, &instance);
                 if (found) {
                     apdu_len = encode_application_object_id(
                         &apdu[0], object_type, instance);
+#if OBJECT_LIST_DEBUG
+                    ESP_LOGI(
+                        OBJECT_LIST_DEBUG_TAG,
+                        "OBJECT_LIST array=%lu -> %s %lu",
+                        (unsigned long)rpdata->array_index,
+                        bactext_object_type_name_default(
+                            object_type, "unknown-object-type"),
+                        (unsigned long)instance);
+#endif
                 } else {
                     rpdata->error_class = ERROR_CLASS_PROPERTY;
                     rpdata->error_code = ERROR_CODE_INVALID_ARRAY_INDEX;
                     apdu_len = BACNET_STATUS_ERROR;
+#if OBJECT_LIST_DEBUG
+                    ESP_LOGW(
+                        OBJECT_LIST_DEBUG_TAG,
+                        "OBJECT_LIST invalid array index %lu",
+                        (unsigned long)rpdata->array_index);
+#endif
                 }
             }
+#if OBJECT_LIST_DEBUG
+            if (apdu_len >= 0) {
+                ESP_LOGI(
+                    OBJECT_LIST_DEBUG_TAG,
+                    "OBJECT_LIST after-encode apdu_len=%d result=%s error_class=%u error_code=%u",
+                    apdu_len,
+                    object_list_debug_result_name(apdu_len),
+                    (unsigned)rpdata->error_class,
+                    (unsigned)rpdata->error_code);
+            } else {
+                ESP_LOGW(
+                    OBJECT_LIST_DEBUG_TAG,
+                    "OBJECT_LIST after-encode apdu_len=%d result=%s error_class=%u error_code=%u",
+                    apdu_len,
+                    object_list_debug_result_name(apdu_len),
+                    (unsigned)rpdata->error_class,
+                    (unsigned)rpdata->error_code);
+            }
+#endif
             break;
         case PROP_MAX_APDU_LENGTH_ACCEPTED:
             apdu_len = encode_application_unsigned(&apdu[0], MAX_APDU);
@@ -1159,6 +1313,24 @@ int Device_Read_Property_Local(BACNET_READ_PROPERTY_DATA *rpdata)
         rpdata->error_code = ERROR_CODE_PROPERTY_IS_NOT_AN_ARRAY;
         apdu_len = BACNET_STATUS_ERROR;
     }
+
+#if OBJECT_LIST_DEBUG
+    if (rpdata->object_property == PROP_OBJECT_LIST) {
+        if (apdu_len >= 0) {
+            ESP_LOGI(
+                OBJECT_LIST_DEBUG_TAG,
+                "leave Device_Read_Property_Local final_apdu_len=%d response_type=%s",
+                apdu_len,
+                object_list_debug_result_name(apdu_len));
+        } else {
+            ESP_LOGW(
+                OBJECT_LIST_DEBUG_TAG,
+                "leave Device_Read_Property_Local final_apdu_len=%d response_type=%s",
+                apdu_len,
+                object_list_debug_result_name(apdu_len));
+        }
+    }
+#endif
 
     return apdu_len;
 }
@@ -1672,6 +1844,7 @@ void Device_Init(object_functions_t *object_table)
     } else {
         Object_Table = &My_Object_Table[0];
     }
+
     pObject = Object_Table;
     while (pObject->Object_Type < MAX_BACNET_OBJECT_TYPE) {
         if (pObject->Object_Init) {

@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include "esp_log.h"
 /* BACnet Stack defines - first */
 #include "bacnet/bacdef.h"
 /* BACnet Stack API */
@@ -373,6 +374,7 @@ static char Serial_Number[MAX_DEV_DESC_LEN + 1] = "";
 /* static uint8_t Max_Segments_Accepted = 0; */
 /* VT_Classes_Supported */
 /* Active_VT_Sessions */
+static uint16_t Max_APDU_Length_Accepted = MAX_APDU;
 static BACNET_TIMESTAMP Time_Of_Device_Restart;
 static BACNET_TIME Local_Time; /* rely on OS, if there is one */
 static BACNET_DATE Local_Date; /* rely on OS, if there is one */
@@ -882,6 +884,18 @@ BACNET_SEGMENTATION Device_Segmentation_Supported(void)
     return SEGMENTATION_NONE;
 }
 
+uint16_t Device_Max_APDU_Accepted(void)
+{
+    return Max_APDU_Length_Accepted;
+}
+
+void Device_Set_Max_APDU_Accepted(uint16_t max_apdu)
+{
+    if (max_apdu >= 50U) {
+        Max_APDU_Length_Accepted = max_apdu;
+    }
+}
+
 /**
  * @brief Get the Database Revision property of the Device Object
  * @return The Database Revision property of the Device Object
@@ -1348,17 +1362,18 @@ int Device_Read_Property_Local(BACNET_READ_PROPERTY_DATA *rpdata)
             count = Device_Object_List_Count();
             apdu_len = bacnet_array_encode(
                 rpdata->object_instance, rpdata->array_index,
-                Device_Object_List_Element_Encode, count, apdu, apdu_max);
+                Device_Object_List_Element_Encode, count, apdu,
+                apdu_max);
             if (apdu_len == BACNET_STATUS_ABORT) {
-                rpdata->error_code =
-                    ERROR_CODE_ABORT_SEGMENTATION_NOT_SUPPORTED;
+                rpdata->error_code = ERROR_CODE_ABORT_SEGMENTATION_NOT_SUPPORTED;
             } else if (apdu_len == BACNET_STATUS_ERROR) {
                 rpdata->error_class = ERROR_CLASS_PROPERTY;
                 rpdata->error_code = ERROR_CODE_INVALID_ARRAY_INDEX;
             }
             break;
         case PROP_MAX_APDU_LENGTH_ACCEPTED:
-            apdu_len = encode_application_unsigned(&apdu[0], MAX_APDU);
+            apdu_len = encode_application_unsigned(
+                &apdu[0], Device_Max_APDU_Accepted());
             break;
         case PROP_SEGMENTATION_SUPPORTED:
             apdu_len = encode_application_enumerated(

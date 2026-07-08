@@ -15,9 +15,13 @@
 static const char *TAG = "wifi_helper";
 static EventGroupHandle_t s_wifi_event_group;
 static bool s_ip_logged;
+static uint8_t s_retry_count;
+static bool s_reconnect_stopped;
 
 #define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAILED_BIT BIT1
 #define WIFI_CFG_NAMESPACE "wifi_cfg"
+#define WIFI_MAX_RETRY_ATTEMPTS 3
 
 static bool wifi_has_text(const char *text)
 {
@@ -83,8 +87,24 @@ static void wifi_event_handler(void *arg,
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_ip_logged = false;
-        esp_wifi_connect();
-        ESP_LOGW(TAG, "WiFi disconnected, retrying connection");
+
+        if (s_reconnect_stopped) {
+            return;
+        }
+
+        if (s_retry_count < WIFI_MAX_RETRY_ATTEMPTS) {
+            s_retry_count++;
+            esp_wifi_connect();
+            ESP_LOGW(TAG, "WiFi disconnected, retrying connection (%u/%u)",
+                     (unsigned)s_retry_count,
+                     (unsigned)WIFI_MAX_RETRY_ATTEMPTS);
+        } else {
+            s_reconnect_stopped = true;
+            ESP_LOGW(TAG, "WiFi reconnect limit reached; stopping retries");
+            if (s_wifi_event_group) {
+                xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
+            }
+        }
         return;
     }
 
@@ -105,16 +125,20 @@ static void wifi_event_handler(void *arg,
         if (s_wifi_event_group) {
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         }
+        s_retry_count = 0;
+        s_reconnect_stopped = false;
     }
 }
 
-/* Simple Wi-Fi setup (blocking until connected) */
-void wifi_init_sta(void)
+/* Simple Wi-Fi setup (blocking with bounded retries) */
+wifi_startup_status_t wifi_init_sta(void)
 {
     /* Initialize networking stack (only call once in app_main context) */
     /* esp_netif_init() and esp_event_loop_create_default() should be called before this */
     s_wifi_event_group = xEventGroupCreate();
     s_ip_logged = false;
+    s_retry_count = 0;
+    s_reconnect_stopped = false;
 
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -198,13 +222,23 @@ void wifi_init_sta(void)
     EventBits_t bits = 0;
     if (s_wifi_event_group) {
         bits = xEventGroupWaitBits(s_wifi_event_group,
-                                   WIFI_CONNECTED_BIT,
+                                   WIFI_CONNECTED_BIT | WIFI_FAILED_BIT,
                                    pdFALSE,
                                    pdFALSE,
-                                   pdMS_TO_TICKS(10000));
+                                   pdMS_TO_TICKS(15000));
     }
 
-    if ((bits & WIFI_CONNECTED_BIT) == 0) {
-        ESP_LOGW(TAG, "WiFi connection timeout - proceeding anyway");
+    if (bits & WIFI_CONNECTED_BIT) {
+        return WIFI_STARTUP_CONNECTED;
     }
+
+    if ((bits & WIFI_FAILED_BIT) == 0) {
+        s_reconnect_stopped = true;
+        if (s_wifi_event_group) {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAILED_BIT);
+        }
+        ESP_LOGW(TAG, "WiFi connection timeout - stopping retries");
+    }
+
+    return WIFI_STARTUP_UNAVAILABLE;
 }

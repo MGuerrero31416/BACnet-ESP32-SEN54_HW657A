@@ -13,6 +13,7 @@
 #include <string.h>
 /* BACnet Stack defines - first */
 #include "bacnet/bacdef.h"
+#include "bacnet/bacenum.h"
 /* BACnet Stack API */
 #include "bacnet/basic/sys/ringbuf.h"
 #include "bacnet/basic/sys/mstimer.h"
@@ -22,9 +23,144 @@
 #include "bacnet/datalink/mstpdef.h"
 #include "bacnet/npdu.h"
 #include "bacnet/bacaddr.h"
+#include "bacnet/basic/sys/debug.h"
 
 /* the current MSTP port that the datalink is using */
 static struct mstp_port_struct_t *MSTP_Port;
+static DLMSTP_SEND_STATUS DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OK;
+
+static bool dlmstp_destination_valid(const BACNET_ADDRESS *dest)
+{
+    if (!dest || (dest->mac_len == 0)) {
+        return true;
+    }
+    if (dest->mac[0] <= DEFAULT_MAX_MASTER) {
+        return true;
+    }
+    if (dest->mac[0] == MSTP_BROADCAST_ADDRESS) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool dlmstp_master_has_token(MSTP_MASTER_STATE master_state)
+{
+    return (master_state == MSTP_MASTER_STATE_USE_TOKEN) ||
+        (master_state == MSTP_MASTER_STATE_DONE_WITH_TOKEN) ||
+        (master_state == MSTP_MASTER_STATE_WAIT_FOR_REPLY) ||
+        (master_state == MSTP_MASTER_STATE_PASS_TOKEN);
+}
+
+static bool dlmstp_master_can_transmit(MSTP_MASTER_STATE master_state)
+{
+    return (master_state == MSTP_MASTER_STATE_USE_TOKEN) ||
+        (master_state == MSTP_MASTER_STATE_ANSWER_DATA_REQUEST);
+}
+
+static const char *dlmstp_master_state_text_short(MSTP_MASTER_STATE state)
+{
+    switch (state) {
+        case MSTP_MASTER_STATE_ANSWER_DATA_REQUEST:
+            return "ANSWER_DATA_REQUEST";
+        case MSTP_MASTER_STATE_USE_TOKEN:
+            return "USE_TOKEN";
+        case MSTP_MASTER_STATE_WAIT_FOR_REPLY:
+            return "WAIT_FOR_REPLY";
+        case MSTP_MASTER_STATE_DONE_WITH_TOKEN:
+            return "DONE_WITH_TOKEN";
+        case MSTP_MASTER_STATE_IDLE:
+            return "IDLE";
+        default:
+            break;
+    }
+
+    return "OTHER";
+}
+
+static DLMSTP_TX_SOURCE dlmstp_classify_tx_source(
+    const uint8_t *pdu,
+    unsigned pdu_len)
+{
+    int npdu_offset = 0;
+    BACNET_ADDRESS dest = { 0 };
+    BACNET_ADDRESS src = { 0 };
+    BACNET_NPDU_DATA npdu_data = { 0 };
+    const uint8_t *apdu = NULL;
+    unsigned apdu_len = 0;
+    uint8_t pdu_type = 0;
+
+    if (!pdu || (pdu_len < 2)) {
+        return DLMSTP_TX_SOURCE_OTHER;
+    }
+
+    npdu_offset = bacnet_npdu_decode(pdu, (uint16_t)pdu_len, &dest, &src, &npdu_data);
+    if ((npdu_offset <= 0) || ((unsigned)npdu_offset >= pdu_len)) {
+        return DLMSTP_TX_SOURCE_OTHER;
+    }
+
+    apdu = &pdu[npdu_offset];
+    apdu_len = pdu_len - (unsigned)npdu_offset;
+    pdu_type = (uint8_t)(apdu[0] & 0xF0);
+
+    if ((pdu_type == PDU_TYPE_SIMPLE_ACK) ||
+        (pdu_type == PDU_TYPE_COMPLEX_ACK) ||
+        (pdu_type == PDU_TYPE_ERROR) ||
+        (pdu_type == PDU_TYPE_REJECT) ||
+        (pdu_type == PDU_TYPE_ABORT)) {
+        return DLMSTP_TX_SOURCE_FINAL_ACK;
+    }
+    if ((pdu_type == PDU_TYPE_UNCONFIRMED_SERVICE_REQUEST) && (apdu_len >= 2)) {
+        if (apdu[1] == SERVICE_UNCONFIRMED_I_AM) {
+            return DLMSTP_TX_SOURCE_I_AM;
+        }
+        if (apdu[1] == SERVICE_UNCONFIRMED_COV_NOTIFICATION) {
+            return DLMSTP_TX_SOURCE_COV;
+        }
+    }
+
+    return DLMSTP_TX_SOURCE_OTHER;
+}
+
+static struct dlmstp_packet *dlmstp_oldest_packet(
+    struct dlmstp_user_data_t *user,
+    unsigned long *age_ms)
+{
+    struct dlmstp_packet *pkt = NULL;
+    unsigned long now_ms = mstimer_now();
+
+    if (age_ms) {
+        *age_ms = 0;
+    }
+    if (!user || Ringbuf_Empty(&user->PDU_Queue)) {
+        return NULL;
+    }
+
+    pkt = (struct dlmstp_packet *)(void *)Ringbuf_Peek(&user->PDU_Queue);
+    if (pkt && age_ms && pkt->queued_ms) {
+        *age_ms = now_ms - pkt->queued_ms;
+    }
+
+    return pkt;
+}
+
+bool dlmstp_token_held(void)
+{
+    if (!MSTP_Port) {
+        return false;
+    }
+
+    return dlmstp_master_has_token(MSTP_Port->master_state);
+}
+
+bool dlmstp_can_transmit_now(void)
+{
+    if (!MSTP_Port) {
+        return false;
+    }
+
+    return dlmstp_master_can_transmit(MSTP_Port->master_state);
+}
 
 /**
  * @brief send an PDU via MSTP
@@ -43,22 +179,95 @@ int dlmstp_send_pdu(
     int bytes_sent = 0;
     unsigned i = 0; /* loop counter */
     struct dlmstp_user_data_t *user = NULL;
-    struct dlmstp_packet *pkt;
+    struct dlmstp_packet *pkt = NULL;
+    struct dlmstp_packet *oldest_pkt = NULL;
+    unsigned queue_capacity = 0;
+    unsigned long oldest_age_ms = 0;
+    uint8_t frame_type = 0;
+    uint8_t destination_mac = MSTP_BROADCAST_ADDRESS;
+    DLMSTP_TX_SOURCE tx_source = DLMSTP_TX_SOURCE_OTHER;
+    bool responder_match = false;
+    uint16_t immediate_frame_len = 0;
+    MSTP_MASTER_STATE master_state = MSTP_MASTER_STATE_IDLE;
+
+    DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OTHER;
 
     if (!MSTP_Port) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_NO_PORT;
         return 0;
     }
     user = MSTP_Port->UserData;
     if (!user) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_NO_USER;
         return 0;
     }
-    pkt = (struct dlmstp_packet *)(void *)Ringbuf_Data_Peek(&user->PDU_Queue);
-    if (pkt && (pdu_len <= DLMSTP_MPDU_MAX)) {
-        if (npdu_data->data_expecting_reply) {
-            pkt->frame_type = FRAME_TYPE_BACNET_DATA_EXPECTING_REPLY;
-        } else {
-            pkt->frame_type = FRAME_TYPE_BACNET_DATA_NOT_EXPECTING_REPLY;
+    if (!npdu_data || !pdu || (pdu_len == 0)) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OTHER;
+        return 0;
+    }
+    if (!dlmstp_destination_valid(dest)) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_INVALID_DESTINATION;
+        return 0;
+    }
+    if (pdu_len > DLMSTP_MPDU_MAX) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_PDU_TOO_LARGE;
+        return 0;
+    }
+
+    if (npdu_data->data_expecting_reply) {
+        frame_type = FRAME_TYPE_BACNET_DATA_EXPECTING_REPLY;
+    } else {
+        frame_type = FRAME_TYPE_BACNET_DATA_NOT_EXPECTING_REPLY;
+    }
+    if (dest && dest->mac_len) {
+        destination_mac = dest->mac[0];
+    }
+    tx_source = dlmstp_classify_tx_source(pdu, pdu_len);
+    queue_capacity = Ringbuf_Size(&user->PDU_Queue);
+    master_state = MSTP_Port->master_state;
+
+    if ((master_state == MSTP_MASTER_STATE_ANSWER_DATA_REQUEST) &&
+        (tx_source == DLMSTP_TX_SOURCE_FINAL_ACK) &&
+        (destination_mac != MSTP_BROADCAST_ADDRESS)) {
+        responder_match = npdu_is_data_expecting_reply(
+            &MSTP_Port->InputBuffer[0], MSTP_Port->DataLength,
+            MSTP_Port->SourceAddress, pdu, pdu_len, destination_mac);
+        if (responder_match) {
+            immediate_frame_len = MSTP_Create_Frame(
+                &MSTP_Port->OutputBuffer[0], MSTP_Port->OutputBufferSize,
+                frame_type, destination_mac, MSTP_Port->This_Station, pdu,
+                (uint16_t)pdu_len);
+            if (immediate_frame_len > 0) {
+                MSTP_Send_Frame(
+                    MSTP_Port, &MSTP_Port->OutputBuffer[0],
+                    immediate_frame_len);
+                user->Statistics.transmit_pdu_counter++;
+                MSTP_Port->master_state = MSTP_MASTER_STATE_IDLE;
+                MSTP_Port->ReceivedValidFrame = false;
+                DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OK;
+                debug_printf(
+                    "dlmstp send_path=immediate_responder frame=%u dst=%u pdu_len=%u master_state=%s\n",
+                    (unsigned)frame_type, (unsigned)destination_mac,
+                    (unsigned)pdu_len,
+                    dlmstp_master_state_text_short(master_state));
+
+                return (int)pdu_len;
+            }
+            DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OTHER;
+
+            return 0;
         }
+    }
+
+    pkt = (struct dlmstp_packet *)(void *)Ringbuf_Data_Peek(&user->PDU_Queue);
+    debug_printf(
+        "dlmstp send_path=queued frame=%u dst=%u pdu_len=%u master_state=%s\n",
+        (unsigned)frame_type, (unsigned)destination_mac, (unsigned)pdu_len,
+        dlmstp_master_state_text_short(master_state));
+    if (pkt) {
+        pkt->frame_type = frame_type;
+        pkt->source_tag = (uint8_t)tx_source;
+        pkt->queued_ms = mstimer_now();
         for (i = 0; i < pdu_len; i++) {
             pkt->pdu[i] = pdu[i];
         }
@@ -74,10 +283,111 @@ int dlmstp_send_pdu(
         }
         if (Ringbuf_Data_Put(&user->PDU_Queue, (uint8_t *)pkt)) {
             bytes_sent = pdu_len;
+            DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OK;
+        } else {
+            DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_QUEUE_FULL;
+            oldest_pkt = dlmstp_oldest_packet(user, &oldest_age_ms);
+            (void)frame_type;
+            (void)destination_mac;
+            (void)pdu_len;
+            (void)tx_source;
+            (void)oldest_age_ms;
+            (void)oldest_pkt;
         }
+    } else {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_QUEUE_FULL;
+        oldest_pkt = dlmstp_oldest_packet(user, &oldest_age_ms);
+        (void)queue_capacity;
+        (void)frame_type;
+        (void)destination_mac;
+        (void)pdu_len;
+        (void)tx_source;
+        (void)oldest_age_ms;
+        (void)oldest_pkt;
     }
 
     return bytes_sent;
+}
+
+DLMSTP_SEND_STATUS dlmstp_send_status_last(void)
+{
+    return DLMSTP_Last_Send_Status;
+}
+
+const char *dlmstp_send_status_text(DLMSTP_SEND_STATUS status)
+{
+    switch (status) {
+        case DLMSTP_SEND_STATUS_OK:
+            return "ok";
+        case DLMSTP_SEND_STATUS_NO_PORT:
+            return "other:no-port";
+        case DLMSTP_SEND_STATUS_NO_USER:
+            return "other:no-user";
+        case DLMSTP_SEND_STATUS_INVALID_DESTINATION:
+            return "invalid destination";
+        case DLMSTP_SEND_STATUS_PDU_TOO_LARGE:
+            return "other:pdu-too-large";
+        case DLMSTP_SEND_STATUS_QUEUE_FULL:
+            return "queue full (PDU_Queue)";
+        case DLMSTP_SEND_STATUS_NOT_ALLOWED_STATE:
+            return "not in allowed MS/TP state";
+        case DLMSTP_SEND_STATUS_OTHER:
+        default:
+            break;
+    }
+
+    return "other";
+}
+
+const char *dlmstp_tx_source_text(DLMSTP_TX_SOURCE source)
+{
+    switch (source) {
+        case DLMSTP_TX_SOURCE_I_AM:
+            return "I-Am";
+        case DLMSTP_TX_SOURCE_FINAL_ACK:
+            return "final-ACK";
+        case DLMSTP_TX_SOURCE_COV:
+            return "COV";
+        case DLMSTP_TX_SOURCE_OTHER:
+        default:
+            break;
+    }
+
+    return "other";
+}
+
+bool dlmstp_send_reply_postponed(uint8_t destination_mac)
+{
+    struct dlmstp_user_data_t *user = NULL;
+
+    if (!MSTP_Port) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_NO_PORT;
+        return false;
+    }
+    user = MSTP_Port->UserData;
+    if (!user) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_NO_USER;
+        return false;
+    }
+    if ((destination_mac > DEFAULT_MAX_MASTER) &&
+        (destination_mac != MSTP_BROADCAST_ADDRESS)) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_INVALID_DESTINATION;
+        return false;
+    }
+    if ((MSTP_Port->master_state != MSTP_MASTER_STATE_ANSWER_DATA_REQUEST) ||
+        (MSTP_Port->SourceAddress != destination_mac)) {
+        DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_NOT_ALLOWED_STATE;
+        return false;
+    }
+
+    MSTP_Create_And_Send_Frame(
+        MSTP_Port, FRAME_TYPE_REPLY_POSTPONED, destination_mac,
+        MSTP_Port->This_Station, NULL, 0);
+    /* Keep ANSWER_DATA_REQUEST context so the matching final ACK can
+       still be transmitted by the normal reply path when ready. */
+    DLMSTP_Last_Send_Status = DLMSTP_SEND_STATUS_OK;
+
+    return true;
 }
 
 /**
@@ -720,6 +1030,52 @@ bool dlmstp_send_pdu_queue_full(void)
     }
 
     return status;
+}
+
+unsigned dlmstp_send_pdu_queue_depth(void)
+{
+    unsigned depth = 0;
+    struct dlmstp_user_data_t *user;
+
+    if (MSTP_Port) {
+        user = MSTP_Port->UserData;
+        if (user) {
+            depth = Ringbuf_Count(&user->PDU_Queue);
+        }
+    }
+
+    return depth;
+}
+
+bool dlmstp_send_pdu_queue_drop_source(DLMSTP_TX_SOURCE source)
+{
+    bool dropped = false;
+    struct dlmstp_user_data_t *user;
+    volatile uint8_t *elem = NULL;
+    volatile uint8_t *next = NULL;
+    struct dlmstp_packet *pkt = NULL;
+
+    if (!MSTP_Port) {
+        return false;
+    }
+    user = MSTP_Port->UserData;
+    if (!user) {
+        return false;
+    }
+
+    elem = Ringbuf_Peek(&user->PDU_Queue);
+    while (elem) {
+        next = Ringbuf_Peek_Next(&user->PDU_Queue, (const uint8_t *)elem);
+        pkt = (struct dlmstp_packet *)(void *)elem;
+        if (pkt->source_tag == (uint8_t)source) {
+            if (Ringbuf_Pop_Element(&user->PDU_Queue, (const uint8_t *)elem, NULL)) {
+                dropped = true;
+            }
+        }
+        elem = next;
+    }
+
+    return dropped;
 }
 
 /**

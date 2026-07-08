@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "esp_log.h"
 /* BACnet Stack defines - first */
 #include "bacnet/bacdef.h"
 /* BACnet Stack API */
@@ -32,6 +33,16 @@
 #include "bacnet/basic/services.h"
 #include "bacnet/basic/sys/debug.h"
 #include "bacnet/datalink/datalink.h"
+
+#ifndef USER_BACNET_ROUTED_COMPAT_MODE
+#define USER_BACNET_ROUTED_COMPAT_MODE 0
+#endif
+
+#ifndef USER_BACNET_ROUTED_COMPAT_MAX_APDU
+#define USER_BACNET_ROUTED_COMPAT_MAX_APDU 128U
+#endif
+
+static const char *RPM_COMPAT_TAG = "rpm_compat";
 
 static uint8_t Temp_Buf[MAX_APDU] = { 0 };
 
@@ -220,8 +231,15 @@ void handler_read_property_multiple(
     int apdu_len = 0;
     int npdu_len = 0;
     int error = 0;
+    uint16_t max_apdu_limit = MAX_APDU;
 
     if (service_data) {
+        max_apdu_limit = (uint16_t)service_data->max_resp;
+#if USER_BACNET_ROUTED_COMPAT_MODE
+        if (max_apdu_limit > USER_BACNET_ROUTED_COMPAT_MAX_APDU) {
+            max_apdu_limit = USER_BACNET_ROUTED_COMPAT_MAX_APDU;
+        }
+#endif
         datalink_get_my_address(&my_address);
         npdu_encode_npdu_data(&npdu_data, false, service_data->priority);
         npdu_len = npdu_encode_pdu(
@@ -282,7 +300,7 @@ void handler_read_property_multiple(
                 len = rpm_ack_encode_apdu_object_begin(&Temp_Buf[0], &rpmdata);
                 copy_len = memcopy(
                     &Handler_Transmit_Buffer[npdu_len], &Temp_Buf[0], apdu_len,
-                    len, MAX_APDU);
+                    len, max_apdu_limit);
                 if (copy_len == 0) {
                     debug_print("RPM: Response too big!\n");
                     rpmdata.error_code =
@@ -321,7 +339,7 @@ void handler_read_property_multiple(
                                 rpmdata.object_type, rpmdata.object_instance)) {
                             len = RPM_Encode_Property(
                                 &Handler_Transmit_Buffer[npdu_len],
-                                (uint16_t)apdu_len, MAX_APDU, &rpmdata);
+                                (uint16_t)apdu_len, max_apdu_limit, &rpmdata);
                             if (len > 0) {
                                 apdu_len += len;
                             } else {
@@ -341,7 +359,7 @@ void handler_read_property_multiple(
 
                             copy_len = memcopy(
                                 &Handler_Transmit_Buffer[npdu_len],
-                                &Temp_Buf[0], apdu_len, len, MAX_APDU);
+                                &Temp_Buf[0], apdu_len, len, max_apdu_limit);
 
                             if (copy_len == 0) {
                                 debug_print(
@@ -362,7 +380,7 @@ void handler_read_property_multiple(
 
                             copy_len = memcopy(
                                 &Handler_Transmit_Buffer[npdu_len],
-                                &Temp_Buf[0], apdu_len, len, MAX_APDU);
+                                &Temp_Buf[0], apdu_len, len, max_apdu_limit);
 
                             if (copy_len == 0) {
                                 debug_print("RPM: Too full to encode error!\n");
@@ -396,7 +414,8 @@ void handler_read_property_multiple(
                                         rpmdata.object_instance)) {
                                     len = RPM_Encode_Property(
                                         &Handler_Transmit_Buffer[npdu_len],
-                                        (uint16_t)apdu_len, MAX_APDU, &rpmdata);
+                                        (uint16_t)apdu_len, max_apdu_limit,
+                                        &rpmdata);
                                     if (len > 0) {
                                         apdu_len += len;
                                     } else {
@@ -418,7 +437,8 @@ void handler_read_property_multiple(
                                             special_object_property, index);
                                     len = RPM_Encode_Property(
                                         &Handler_Transmit_Buffer[npdu_len],
-                                        (uint16_t)apdu_len, MAX_APDU, &rpmdata);
+                                        (uint16_t)apdu_len, max_apdu_limit,
+                                        &rpmdata);
                                     if (len > 0) {
                                         apdu_len += len;
                                     } else {
@@ -437,7 +457,7 @@ void handler_read_property_multiple(
                         /* handle an individual property */
                         len = RPM_Encode_Property(
                             &Handler_Transmit_Buffer[npdu_len],
-                            (uint16_t)apdu_len, MAX_APDU, &rpmdata);
+                            (uint16_t)apdu_len, max_apdu_limit, &rpmdata);
                         if (len > 0) {
                             apdu_len += len;
                         } else {
@@ -459,7 +479,7 @@ void handler_read_property_multiple(
                         len = rpm_ack_encode_apdu_object_end(&Temp_Buf[0]);
                         copy_len = memcopy(
                             &Handler_Transmit_Buffer[npdu_len], &Temp_Buf[0],
-                            apdu_len, len, MAX_APDU);
+                            apdu_len, len, max_apdu_limit);
                         if (copy_len == 0) {
                             debug_print(
                                 "RPM: Too full to encode object end!\n");
@@ -487,12 +507,20 @@ void handler_read_property_multiple(
             }
             /* If not having an error so far, check the remaining space. */
             if (!berror) {
-                if (apdu_len > service_data->max_resp) {
+                if (apdu_len > (int)max_apdu_limit) {
                     /* too big for the sender - send an abort */
                     rpmdata.error_code =
                         ERROR_CODE_ABORT_SEGMENTATION_NOT_SUPPORTED;
                     error = BACNET_STATUS_ABORT;
                     debug_print("RPM: Message too large.  Sending Abort!\n");
+#if USER_BACNET_ROUTED_COMPAT_MODE
+                    ESP_LOGW(
+                        RPM_COMPAT_TAG,
+                        "RPM response blocked by routed compat mode invoke=%u apdu_len=%d limit=%u",
+                        (unsigned)service_data->invoke_id,
+                        apdu_len,
+                        (unsigned)max_apdu_limit);
+#endif
                 }
             }
         }

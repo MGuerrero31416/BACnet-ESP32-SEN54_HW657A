@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_wifi.h"
@@ -49,10 +50,24 @@
 #include "bacnet/whois.h"
 #include "bacnet/iam.h"
 #include "bacnet/npdu.h"
+#include "bacnet/rp.h"
+#include "bacnet/rpm.h"
+#include "bacnet/dcc.h"
+#include "bacnet/config.h"
 #include "bacnet/basic/npdu/h_npdu.h"
 #include "bacnet/bacenum.h"
 
 static const char *TAG = "bacnet";
+
+/* Temporary discovery tracing gate.
+ * Keep off in normal operation so serial logs stay focused.
+ */
+#ifndef BACNET_DISCOVERY_DEBUG
+#define BACNET_DISCOVERY_DEBUG 0
+#endif
+
+#define MSTP_TRANSPORT_BUFFER_SIZE 1024
+#define MSTP_APDU_BUFFER_SIZE 1024
 
 int override_nvs_on_flash = 0;  /* Exported for AV/BV modules */
 
@@ -62,6 +77,10 @@ static void bacnet_receive_task(void *pvParameters);
 static void bacnet_mstp_receive_task(void *pvParameters);
 static void bacnet_cov_task(void *pvParameters);
 static void sen54_task(void *pvParameters);
+static void handler_who_is_debug(
+    uint8_t *service_request,
+    uint16_t service_len,
+    BACNET_ADDRESS *src);
 static TaskHandle_t bacnet_cov_task_handle = NULL;
 static SemaphoreHandle_t bacnet_datalink_mutex = NULL;
 static volatile uint32_t mstp_pdu_count = 0;
@@ -69,6 +88,18 @@ static volatile uint32_t mstp_apdu_count = 0;
 static volatile uint32_t mstp_rp_total = 0;
 static volatile uint32_t mstp_wp_total = 0;
 static float mstp_rp_last_value = 0.0f;
+
+typedef struct {
+    bool valid;
+    const char *link;
+    BACNET_ADDRESS src;
+    BACNET_ADDRESS dest;
+} BACNET_WHOIS_RX_CONTEXT;
+
+static BACNET_WHOIS_RX_CONTEXT s_whois_rx_context = {
+    .valid = false,
+    .link = "unknown"
+};
 
 #define SEN54_AUTO_CLEANING_AV_INSTANCE 7U
 #define SEN54_MEASUREMENT_ENABLE_BV_INSTANCE 2U
@@ -137,6 +168,7 @@ static void bacnet_log_whois_iam(const uint8_t *apdu, int apdu_len, const char *
 
     uint8_t service_choice = apdu[1];
     if (service_choice == SERVICE_UNCONFIRMED_WHO_IS) {
+#if BACNET_DISCOVERY_DEBUG
         int32_t low_limit = -1;
         int32_t high_limit = -1;
         int len = whois_decode_service_request(
@@ -148,7 +180,6 @@ static void bacnet_log_whois_iam(const uint8_t *apdu, int apdu_len, const char *
                 in_range = (instance >= (uint32_t)low_limit &&
                     instance <= (uint32_t)high_limit);
             }
-            /*
             ESP_LOGI(
                 TAG,
                 "%s Who-Is low=%ld high=%ld local_instance=%lu match=%s",
@@ -157,13 +188,13 @@ static void bacnet_log_whois_iam(const uint8_t *apdu, int apdu_len, const char *
                 (long)high_limit,
                 (unsigned long)USER_BACNET_DEVICE_INSTANCE,
                 in_range ? "yes" : "no");
-            */
             (void)in_range;
             (void)low_limit;
             (void)high_limit;
         } else {
-            /* ESP_LOGW(TAG, "%s Who-Is decode failed len=%d", link, apdu_len); */
+            ESP_LOGW(TAG, "%s Who-Is decode failed len=%d", link, apdu_len);
         }
+#endif
     } else if (service_choice == SERVICE_UNCONFIRMED_I_AM) {
         uint32_t device_id = BACNET_MAX_INSTANCE;
         unsigned max_apdu = 0;
@@ -185,12 +216,203 @@ static void bacnet_log_whois_iam(const uint8_t *apdu, int apdu_len, const char *
     }
 }
 
+#if BACNET_DISCOVERY_DEBUG
+static const char *bacnet_whois_target_type(const BACNET_ADDRESS *dest)
+{
+    if (dest && dest->net == BACNET_BROADCAST_NETWORK) {
+        return "global_broadcast";
+    }
+    if (dest && ((dest->net > 0U) || (dest->mac_len > 0U))) {
+        return "directed";
+    }
+
+    return "local_broadcast";
+}
+#endif
+
+static void bacnet_whois_context_set(
+    const char *link,
+    const BACNET_ADDRESS *src,
+    const BACNET_ADDRESS *dest)
+{
+    s_whois_rx_context.valid = true;
+    s_whois_rx_context.link = link ? link : "unknown";
+
+    if (src) {
+        s_whois_rx_context.src = *src;
+    } else {
+        memset(&s_whois_rx_context.src, 0, sizeof(s_whois_rx_context.src));
+    }
+
+    if (dest) {
+        s_whois_rx_context.dest = *dest;
+    } else {
+        memset(&s_whois_rx_context.dest, 0, sizeof(s_whois_rx_context.dest));
+    }
+}
+
+static void bacnet_whois_context_clear(void)
+{
+    s_whois_rx_context.valid = false;
+    s_whois_rx_context.link = "unknown";
+    memset(&s_whois_rx_context.src, 0, sizeof(s_whois_rx_context.src));
+    memset(&s_whois_rx_context.dest, 0, sizeof(s_whois_rx_context.dest));
+}
+
+static int bacnet_send_i_am_with_reason(const char *reason, const char *link, bool dcc_gate)
+{
+    BACNET_ADDRESS dest = { 0 };
+    BACNET_NPDU_DATA npdu_data = { 0 };
+    uint32_t device_instance = Device_Object_Instance_Number();
+    unsigned max_apdu = Device_Max_APDU_Accepted();
+    int segmentation = SEGMENTATION_NONE;
+    uint16_t vendor_id = Device_Vendor_Identifier();
+    int pdu_len = 0;
+    int bytes_sent = 0;
+
+    if (dcc_gate && dcc_communication_initiation_disabled()) {
+        ESP_LOGI(
+            TAG,
+            "I-Am TX reason=%s via=%s skipped: communication initiation disabled",
+            reason ? reason : "unspecified",
+            link ? link : "unknown");
+        return 0;
+    }
+
+    pdu_len = iam_encode_pdu(Handler_Transmit_Buffer, &dest, &npdu_data);
+    bytes_sent =
+        datalink_send_pdu(&dest, &npdu_data, Handler_Transmit_Buffer, pdu_len);
+
+    ESP_LOGI(
+        TAG,
+        "I-Am TX reason=%s via=%s device_instance=%lu max_apdu=%u segmentation=%d vendor_id=%u result=%d",
+        reason ? reason : "unspecified",
+        link ? link : "unknown",
+        (unsigned long)device_instance,
+        max_apdu,
+        segmentation,
+        (unsigned)vendor_id,
+        bytes_sent);
+
+    if (link && strcmp(link, "MSTP") == 0) {
+        ESP_LOGI(TAG, "I-Am MS/TP send result=%d", bytes_sent);
+    }
+
+    return bytes_sent;
+}
+
+static void handler_who_is_debug(
+    uint8_t *service_request,
+    uint16_t service_len,
+    BACNET_ADDRESS *src)
+{
+    int decode_len = BACNET_STATUS_ERROR;
+    int32_t low_limit = -1;
+    int32_t high_limit = -1;
+    uint32_t local_instance = Device_Object_Instance_Number();
+    bool has_limits = false;
+    bool in_range = true;
+    bool send_i_am = false;
+#if BACNET_DISCOVERY_DEBUG
+    const BACNET_ADDRESS *ctx_src = src;
+    BACNET_ADDRESS empty_dest = { 0 };
+    const BACNET_ADDRESS *ctx_dest = &empty_dest;
+#endif
+    const char *link = "unknown";
+
+    if (s_whois_rx_context.valid) {
+#if BACNET_DISCOVERY_DEBUG
+        ctx_src = &s_whois_rx_context.src;
+        ctx_dest = &s_whois_rx_context.dest;
+#endif
+        link = s_whois_rx_context.link;
+    }
+
+#if BACNET_DISCOVERY_DEBUG
+    ESP_LOGI(
+        TAG,
+        "%s Who-Is RX src_mstp_mac=%d dest_mac=%d class=%s len=%u (pre-filter)",
+        link,
+        (ctx_src && ctx_src->mac_len > 0U) ? (int)ctx_src->mac[0] : -1,
+        (ctx_dest && ctx_dest->mac_len > 0U) ? (int)ctx_dest->mac[0] : -1,
+        bacnet_whois_target_type(ctx_dest),
+        (unsigned)service_len);
+
+    if (service_len > 0U) {
+        ESP_LOGI(TAG, "%s Who-Is raw APDU payload (%u bytes):", link, (unsigned)service_len);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, service_request, service_len, ESP_LOG_INFO);
+    } else {
+        ESP_LOGI(TAG, "%s Who-Is raw APDU payload: <empty>", link);
+    }
+#endif
+
+    if (service_len == 0U) {
+        has_limits = false;
+        in_range = true;
+        send_i_am = true;
+    } else {
+        decode_len = whois_decode_service_request(
+            service_request, service_len, &low_limit, &high_limit);
+        has_limits =
+            (decode_len > 0) &&
+            ((uint16_t)decode_len == service_len) &&
+            (low_limit >= 0) &&
+            (high_limit >= 0);
+
+        if (has_limits) {
+            in_range =
+                (local_instance >= (uint32_t)low_limit) &&
+                (local_instance <= (uint32_t)high_limit);
+            send_i_am = in_range;
+        } else {
+            in_range = false;
+            send_i_am = false;
+        }
+    }
+
+#if BACNET_DISCOVERY_DEBUG
+    if (!has_limits && service_len > 0U) {
+        ESP_LOGW(
+            TAG,
+            "%s Who-Is limit decode failed/partial decode_len=%d service_len=%u",
+            link,
+            decode_len,
+            (unsigned)service_len);
+    }
+#endif
+
+    if (has_limits) {
+        in_range =
+            (local_instance >= (uint32_t)low_limit) &&
+            (local_instance <= (uint32_t)high_limit);
+        send_i_am = in_range;
+    }
+
+#if BACNET_DISCOVERY_DEBUG
+    ESP_LOGI(
+        TAG,
+        "%s Who-Is eval has_limits=%s low_limit=%ld high_limit=%ld local_instance=%lu in_range=%s send_i_am=%s",
+        link,
+        has_limits ? "yes" : "no",
+        (long)low_limit,
+        (long)high_limit,
+        (unsigned long)local_instance,
+        in_range ? "yes" : "no",
+        send_i_am ? "yes" : "no");
+#endif
+
+    if (send_i_am) {
+        (void)bacnet_send_i_am_with_reason("response_to_who_is", link, false);
+    }
+}
+
 static char datalink_bip[] = "bip";
 static char datalink_mstp[] = "mstp";
 static char *datalink_default = NULL;
+static bool s_bacnet_ip_active = false;
 
-static uint8_t mstp_rx_buffer[512];
-static uint8_t mstp_tx_buffer[512];
+static uint8_t mstp_rx_buffer[MSTP_TRANSPORT_BUFFER_SIZE];
+static uint8_t mstp_tx_buffer[MSTP_TRANSPORT_BUFFER_SIZE];
 static struct mstp_port_struct_t mstp_port;
 static struct dlmstp_user_data_t mstp_user;
 static struct dlmstp_rs485_driver mstp_rs485_driver = {
@@ -203,6 +425,132 @@ static struct dlmstp_rs485_driver mstp_rs485_driver = {
     .silence_milliseconds = MSTP_RS485_Silence_Milliseconds,
     .silence_reset = MSTP_RS485_Silence_Reset
 };
+
+static void bacnet_track_confirmed_request_mstp(
+    const uint8_t *apdu,
+    int apdu_len,
+    const BACNET_ADDRESS *src,
+    const BACNET_ADDRESS *dest,
+    const char *link)
+{
+    MSTP_RS485_CONFIRMED_REQUEST_META track = { 0 };
+    BACNET_READ_PROPERTY_DATA rp_data = { 0 };
+    BACNET_RPM_DATA rpm_data = { 0 };
+    uint16_t object_type = 0xFFFF;
+    uint32_t object_instance = BACNET_MAX_INSTANCE;
+    uint32_t object_property = 0xFFFFFFFFUL;
+    uint32_t array_index = BACNET_ARRAY_ALL;
+    bool routed_request = false;
+    bool should_send_reply_postponed = false;
+    bool reply_postponed_sent = false;
+    int64_t request_rx_us = 0;
+    int64_t reply_postponed_tx_us = 0;
+    int len = 0;
+    uint8_t pdu_type = 0;
+    uint8_t service_choice = 0;
+    uint8_t invoke_id = 0;
+    uint8_t requester_mac = 0xFF;
+
+    if (!apdu || (apdu_len < 5)) {
+        return;
+    }
+
+    pdu_type = apdu[0] & 0xF0;
+    if (pdu_type != PDU_TYPE_CONFIRMED_SERVICE_REQUEST) {
+        return;
+    }
+    if ((apdu[0] & BIT(3)) != 0) {
+        /* Segmented request: leave behavior unchanged. */
+        return;
+    }
+
+    invoke_id = apdu[2];
+    service_choice = apdu[3];
+    if (src && src->len > 0) {
+        requester_mac = src->mac[0];
+    }
+
+    if (src &&
+        (src->net != 0) &&
+        (src->net != BACNET_BROADCAST_NETWORK)) {
+        routed_request = true;
+    }
+
+    if (service_choice == SERVICE_CONFIRMED_READ_PROPERTY) {
+        len = rp_decode_service_request(&apdu[4], (uint16_t)(apdu_len - 4), &rp_data);
+        if (len > 0) {
+            object_type = (uint16_t)rp_data.object_type;
+            object_instance = rp_data.object_instance;
+            object_property = (uint32_t)rp_data.object_property;
+            array_index = rp_data.array_index;
+            if (rp_data.object_property == PROP_OBJECT_LIST) {
+                should_send_reply_postponed = true;
+            }
+        }
+    } else if (service_choice == SERVICE_CONFIRMED_READ_PROP_MULTIPLE) {
+        len = rpm_decode_object_id(&apdu[4], (unsigned)(apdu_len - 4), &rpm_data);
+        if (len > 0) {
+            object_type = (uint16_t)rpm_data.object_type;
+            object_instance = rpm_data.object_instance;
+            len += rpm_decode_object_property(
+                &apdu[4 + len],
+                (unsigned)(apdu_len - 4 - len),
+                &rpm_data);
+            if (len > 0) {
+                object_property = (uint32_t)rpm_data.object_property;
+                array_index = rpm_data.array_index;
+            }
+        }
+        should_send_reply_postponed = true;
+    }
+
+    if (routed_request) {
+        should_send_reply_postponed = true;
+    }
+
+    request_rx_us = esp_timer_get_time();
+    ESP_LOGI(
+        TAG,
+        "%s request received invoke=%u requester_mac=%u service=%u object=%u:%lu property=%lu array=%lu",
+        link,
+        (unsigned)invoke_id,
+        (unsigned)requester_mac,
+        (unsigned)service_choice,
+        (unsigned)object_type,
+        (unsigned long)object_instance,
+        (unsigned long)object_property,
+        (unsigned long)array_index);
+
+    if (should_send_reply_postponed && requester_mac != 0xFF) {
+        reply_postponed_sent =
+            dlmstp_send_reply_postponed(requester_mac);
+        if (reply_postponed_sent) {
+            reply_postponed_tx_us = esp_timer_get_time();
+        }
+    }
+
+    ESP_LOGI(
+        TAG,
+        "%s reply postponed sent invoke=%u requester_mac=%u yes=%s req_to_postponed_ms=%ld",
+        link,
+        (unsigned)invoke_id,
+        (unsigned)requester_mac,
+        reply_postponed_sent ? "yes" : "no",
+        (long)(reply_postponed_sent ? ((reply_postponed_tx_us - request_rx_us) / 1000) : -1));
+
+    track.invoke_id = invoke_id;
+    track.requester_mac = requester_mac;
+    track.service_choice = service_choice;
+    track.object_type = object_type;
+    track.object_instance = object_instance;
+    track.object_property = object_property;
+    track.array_index = array_index;
+    track.reply_postponed_sent = reply_postponed_sent;
+    track.request_rx_us = request_rx_us;
+    track.reply_postponed_tx_us = reply_postponed_tx_us;
+    (void)dest;
+    MSTP_RS485_Confirmed_Request_Track(&track);
+}
 
 static void bacnet_datalink_lock(char *name)
 {
@@ -246,12 +594,15 @@ static bool bacnet_mstp_init(void)
 
     ESP_LOGI(
         TAG,
-        "MS/TP config: mac=%u max_master=%u max_info=%u baud=%lu auto_baud=%s",
+        "MS/TP startup profile: mac=%u baud=%lu max_master=%u max_info=%u tx_buf=%u rx_buf=%u apdu_buf=%u max_apdu=%u",
         (unsigned)USER_MSTP_MAC_ADDRESS,
-        (unsigned)USER_MSTP_MAX_MASTER,
-        (unsigned)USER_MSTP_MAX_INFO_FRAMES,
         (unsigned long)USER_MSTP_BAUD_RATE,
-        USER_MSTP_AUTO_BAUD ? "on" : "off");
+        (unsigned)USER_MSTP_MAX_MASTER,
+        (unsigned)dlmstp_max_info_frames(),
+        (unsigned)sizeof(mstp_tx_buffer),
+        (unsigned)sizeof(mstp_rx_buffer),
+        (unsigned)MSTP_APDU_BUFFER_SIZE,
+        (unsigned)Device_Max_APDU_Accepted());
 
     return dlmstp_init((char *)&mstp_port);
 }
@@ -261,7 +612,7 @@ static void bacnet_receive_task(void *pvParameters)
 {
     (void)pvParameters;
     BACNET_ADDRESS src = {0};
-    static uint8_t rx_buffer[600];  /* Smaller buffer in DRAM */
+    static uint8_t rx_buffer[MSTP_APDU_BUFFER_SIZE];
     uint16_t pdu_len = 0;
 
     ESP_LOGI(TAG, "BACnet receive task started");
@@ -284,7 +635,14 @@ static void bacnet_receive_task(void *pvParameters)
             if (apdu_offset > 0 && apdu_offset < (int)pdu_len) {
                 bacnet_log_whois_iam(&rx_buffer[apdu_offset], pdu_len - apdu_offset, "bip");
                 bacnet_datalink_lock(datalink_bip);
+                if (((rx_buffer[apdu_offset] & 0xF0U) ==
+                        PDU_TYPE_UNCONFIRMED_SERVICE_REQUEST) &&
+                    (apdu_offset + 1 < (int)pdu_len) &&
+                    (rx_buffer[apdu_offset + 1] == SERVICE_UNCONFIRMED_WHO_IS)) {
+                    bacnet_whois_context_set("BIP", &src, &dest);
+                }
                 apdu_handler(&src, &rx_buffer[apdu_offset], pdu_len - apdu_offset);
+                bacnet_whois_context_clear();
                 bacnet_datalink_unlock();
             }
         }
@@ -297,7 +655,7 @@ static void bacnet_mstp_receive_task(void *pvParameters)
 {
     (void)pvParameters;
     BACNET_ADDRESS src = {0};
-    static uint8_t rx_buffer[600];
+    static uint8_t rx_buffer[MSTP_APDU_BUFFER_SIZE];
     uint16_t pdu_len = 0;
 
     ESP_LOGI(TAG, "BACnet MS/TP receive task started");
@@ -313,6 +671,14 @@ static void bacnet_mstp_receive_task(void *pvParameters)
                 rx_buffer, pdu_len, &dest, &src, &npdu_data);
             if (apdu_offset > 0 && apdu_offset < (int)pdu_len) {
                 mstp_apdu_count++;
+                if (USER_MSTP_ENABLE_REPLY_POSTPONED) {
+                    bacnet_track_confirmed_request_mstp(
+                        &rx_buffer[apdu_offset],
+                        pdu_len - apdu_offset,
+                        &src,
+                        &dest,
+                        "mstp");
+                }
                 if ((apdu_offset + 4) <= (int)pdu_len) {
                     uint8_t pdu_type = rx_buffer[apdu_offset] & 0xF0;
                     uint8_t service_choice = rx_buffer[apdu_offset + 3];
@@ -327,7 +693,14 @@ static void bacnet_mstp_receive_task(void *pvParameters)
                 }
                 bacnet_log_whois_iam(&rx_buffer[apdu_offset], pdu_len - apdu_offset, "mstp");
                 bacnet_datalink_lock(datalink_mstp);
+                if (((rx_buffer[apdu_offset] & 0xF0U) ==
+                        PDU_TYPE_UNCONFIRMED_SERVICE_REQUEST) &&
+                    (apdu_offset + 1 < (int)pdu_len) &&
+                    (rx_buffer[apdu_offset + 1] == SERVICE_UNCONFIRMED_WHO_IS)) {
+                    bacnet_whois_context_set("MSTP", &src, &dest);
+                }
                 apdu_handler(&src, &rx_buffer[apdu_offset], pdu_len - apdu_offset);
+                bacnet_whois_context_clear();
                 bacnet_datalink_unlock();
             } else {
                 ESP_LOGW(TAG, "MS/TP RX frame decode failed: len=%u apdu_offset=%d src.len=%u src.mac=%u",
@@ -343,6 +716,12 @@ static void bacnet_mstp_receive_task(void *pvParameters)
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
+    const char *wifi_status_summary = "disabled";
+    s_bacnet_ip_active = false;
+
+    if (USER_ENABLE_BACNET_MSTP) {
+        Device_Set_Max_APDU_Accepted(USER_BACNET_MSTP_MAX_APDU);
+    }
 
     bacnet_datalink_mutex = xSemaphoreCreateMutex();
     if (!bacnet_datalink_mutex) {
@@ -378,20 +757,36 @@ void app_main(void)
     User_Settings_Print();
 
     if (USER_ENABLE_BACNET_IP) {
+        wifi_startup_status_t wifi_status;
+
         /* Initialize network stack (must be done before WiFi init) */
         esp_netif_init();
         esp_event_loop_create_default();
 
-        wifi_init_sta();
+        wifi_status = wifi_init_sta();
 
-        ESP_LOGI(TAG, "Initializing BACnet stack (B/IP)");
-        datalink_set(datalink_bip);
-        if (!datalink_init(NULL)) {
-            ESP_LOGE(TAG, "Failed to initialize BACnet datalink");
-            return;
+        if (wifi_status == WIFI_STARTUP_CONNECTED) {
+            wifi_status_summary = "connected";
+            s_bacnet_ip_active = true;
+        } else {
+            wifi_status_summary = "unavailable";
+            ESP_LOGW(TAG, "WiFi unavailable; continuing with BACnet MS/TP only");
         }
 
-        bacnet_register_with_bbmd();
+        ESP_LOGI(TAG, "WiFi status: %s", wifi_status_summary);
+
+        if (s_bacnet_ip_active) {
+            ESP_LOGI(TAG, "Initializing BACnet stack (B/IP)");
+            datalink_set(datalink_bip);
+            if (!datalink_init(NULL)) {
+                ESP_LOGE(TAG, "Failed to initialize BACnet datalink");
+                s_bacnet_ip_active = false;
+            } else {
+                bacnet_register_with_bbmd();
+            }
+        }
+    } else {
+        ESP_LOGI(TAG, "WiFi status: %s", wifi_status_summary);
     }
 
     if (USER_ENABLE_BACNET_MSTP) {
@@ -406,7 +801,7 @@ void app_main(void)
         }
     }
 
-    if (USER_ENABLE_BACNET_IP) {
+    if (s_bacnet_ip_active) {
         datalink_default = datalink_bip;
     } else if (USER_ENABLE_BACNET_MSTP) {
         datalink_default = datalink_mstp;
@@ -421,7 +816,7 @@ void app_main(void)
     /* Register service handlers - using bacnet-stack library handlers */
     ESP_LOGI(TAG, "Registering BACnet service handlers");
     apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_I_AM, handler_i_am_add);
-    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_WHO_IS, handler_who_is);
+    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_WHO_IS, handler_who_is_debug);
     apdu_set_unrecognized_service_handler_handler(handler_unrecognized_service);
     /* Read Property - REQUIRED for BACnet devices */
     apdu_set_confirmed_handler(SERVICE_CONFIRMED_READ_PROPERTY, handler_read_property);
@@ -441,14 +836,14 @@ void app_main(void)
     bacnet_create_binary_outputs_with_gpio_sync();  /* Create BO with GPIO sync task */
 
     ESP_LOGI(TAG, "Broadcasting I-Am");
-    if (USER_ENABLE_BACNET_IP) {
+    if (s_bacnet_ip_active) {
         bacnet_datalink_lock(datalink_bip);
-        Send_I_Am(Handler_Transmit_Buffer);
+        (void)bacnet_send_i_am_with_reason("startup", "BIP", true);
         bacnet_datalink_unlock();
     }
     if (USER_ENABLE_BACNET_MSTP) {
         bacnet_datalink_lock(datalink_mstp);
-        Send_I_Am(Handler_Transmit_Buffer);
+        (void)bacnet_send_i_am_with_reason("startup", "MSTP", true);
         bacnet_datalink_unlock();
     }
 
@@ -457,7 +852,7 @@ void app_main(void)
     display_init();
 
     /* Start BACnet receive task to handle incoming messages */
-    if (USER_ENABLE_BACNET_IP) {
+    if (s_bacnet_ip_active) {
         if (xTaskCreate(bacnet_receive_task, "bacnet_rx", 16384, NULL, 5, NULL) != pdPASS) {
             ESP_LOGE(TAG, "Failed to create bacnet_rx task");
         }
@@ -475,6 +870,10 @@ void app_main(void)
     }
 
     if (USER_ENABLE_BACNET_MSTP) {
+        (void)dlmstp_send_pdu_queue_drop_source(DLMSTP_TX_SOURCE_I_AM);
+    }
+
+    if (USER_ENABLE_BACNET_MSTP) {
         ESP_LOGI(TAG, "BACnet MS/TP ready");
         dlmstp_reset_statistics();
     }
@@ -486,16 +885,20 @@ void app_main(void)
     uint32_t mstp_last_seen_pdu = 0;
     uint8_t mstp_alive_ticks = 0;
     while (1) {
-        if (USER_ENABLE_BACNET_IP) {
+        if (s_bacnet_ip_active) {
             bacnet_datalink_lock(datalink_bip);
             datalink_maintenance_timer(1);
             bacnet_datalink_unlock();
         }
 
         if (USER_ENABLE_BACNET_MSTP && ++iam_tick % 60 == 0) {
-            bacnet_datalink_lock(datalink_mstp);
-            Send_I_Am(Handler_Transmit_Buffer);
-            bacnet_datalink_unlock();
+            if ((dlmstp_send_pdu_queue_depth() == 0U) &&
+                dlmstp_token_held() &&
+                dlmstp_can_transmit_now()) {
+                bacnet_datalink_lock(datalink_mstp);
+                (void)bacnet_send_i_am_with_reason("periodic", "MSTP", true);
+                bacnet_datalink_unlock();
+            }
         }
 
         if (USER_ENABLE_BACNET_MSTP && ++mstp_rx_tick % 30 == 0) {
@@ -591,7 +994,7 @@ static void bacnet_cov_task(void *pvParameters)
     while (1) {
         char *active_datalink = datalink_default;
         if (!active_datalink) {
-            if (USER_ENABLE_BACNET_IP) {
+            if (s_bacnet_ip_active) {
                 active_datalink = datalink_bip;
             } else if (USER_ENABLE_BACNET_MSTP) {
                 active_datalink = datalink_mstp;

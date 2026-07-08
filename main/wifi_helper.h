@@ -7,11 +7,16 @@ extern "C" {
 
 #include "esp_err.h"
 
+typedef enum {
+	WIFI_STARTUP_UNAVAILABLE = 0,
+	WIFI_STARTUP_CONNECTED = 1
+} wifi_startup_status_t;
+
 /**
- * Initialize WiFi in station mode and connect to the configured network.
- * Blocks until connected or timeout occurs.
+ * Initialize Wi-Fi in station mode and try to connect to the configured network.
+ * Returns connection status after bounded retry attempts.
  */
-void wifi_init_sta(void);
+wifi_startup_status_t wifi_init_sta(void);
 
 /**
  * Store Wi-Fi credentials in application NVS namespace.
