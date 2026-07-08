@@ -4,12 +4,6 @@ cmake_minimum_required(VERSION 3.16)
 
 set(EXCLUDE_COMPONENTS TFT_eSPI)
 
-# Temporary routed-client compatibility profile.
-add_compile_definitions(
-	USER_BACNET_ROUTED_COMPAT_MODE=1
-	USER_BACNET_ROUTED_COMPAT_MAX_APDU=128
-)
-
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
 #idf_build_set_property(MINIMAL_BUILD ON)

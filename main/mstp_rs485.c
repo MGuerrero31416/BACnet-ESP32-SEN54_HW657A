@@ -19,7 +19,10 @@
 #define MSTP_UART_BAUD_DEFAULT 38400U
 #define MSTP_UART_RX_BUF_SIZE 512
 #define MSTP_UART_TX_BUF_SIZE 512
-#define MSTP_UART_TX_TIMEOUT_MS 100
+#define MSTP_UART_TX_WAIT_MARGIN_MS 50U
+#define MSTP_UART_TX_WAIT_MIN_MS 100U
+#define MSTP_UART_TX_WAIT_MAX_MS 500U
+#define MSTP_UART_BITS_PER_BYTE 10U
 #define MSTP_RS485_DE_PRE_TX_GUARD_MS 1
 #define MSTP_RS485_DE_POST_TX_GUARD_MS 1
 
@@ -309,6 +312,34 @@ static bool mstp_is_confirmed_response_pdu(uint8_t pdu_type)
         (pdu_type == PDU_TYPE_ABORT);
 }
 
+static TickType_t mstp_uart_tx_wait_ticks_for_frame(uint16_t total_len)
+{
+    uint32_t baud_rate = mstp_baud_rate;
+    uint32_t tx_time_ms = 0;
+    uint32_t timeout_ms = 0;
+    TickType_t ticks = 0;
+
+    if (baud_rate == 0U) {
+        baud_rate = MSTP_UART_BAUD_DEFAULT;
+    }
+
+    tx_time_ms = ((uint32_t)total_len * MSTP_UART_BITS_PER_BYTE * 1000U) /
+        baud_rate;
+    timeout_ms = tx_time_ms + MSTP_UART_TX_WAIT_MARGIN_MS;
+    if (timeout_ms < MSTP_UART_TX_WAIT_MIN_MS) {
+        timeout_ms = MSTP_UART_TX_WAIT_MIN_MS;
+    } else if (timeout_ms > MSTP_UART_TX_WAIT_MAX_MS) {
+        timeout_ms = MSTP_UART_TX_WAIT_MAX_MS;
+    }
+
+    ticks = pdMS_TO_TICKS(timeout_ms);
+    if (ticks == 0) {
+        ticks = 1;
+    }
+
+    return ticks;
+}
+
 #if BACNET_MSTP_TX_HEX_DEBUG
 static void mstp_log_hex_frame_full(const uint8_t *payload, uint16_t payload_len)
 {
@@ -412,7 +443,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     int de_level_after_enable = -1;
     int de_level_before_disable = -1;
     int de_level_after_disable = -1;
-    TickType_t tx_wait_ticks = pdMS_TO_TICKS(MSTP_UART_TX_TIMEOUT_MS);
+    TickType_t tx_wait_ticks = 0;
 
     if (!payload || payload_len == 0) {
         return;
@@ -445,9 +476,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         ESP_LOGE(TAG, "UART write failed");
     }
 
-    if (tx_wait_ticks == 0) {
-        tx_wait_ticks = 1;
-    }
+    tx_wait_ticks = mstp_uart_tx_wait_ticks_for_frame(payload_len);
 
     tx_done = uart_wait_tx_done(MSTP_UART_PORT, tx_wait_ticks);
 
