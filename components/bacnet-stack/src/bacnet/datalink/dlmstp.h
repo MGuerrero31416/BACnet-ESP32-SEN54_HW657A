@@ -48,6 +48,24 @@ typedef struct dlmstp_statistics {
     uint32_t poll_for_master_counter;
 } DLMSTP_STATISTICS;
 
+typedef struct dlmstp_token_diagnostics {
+    uint32_t poll_for_master_to_us_counter;
+    uint32_t reply_to_poll_for_master_sent_counter;
+    uint32_t pfm_expected_token_accepted_counter;
+    uint32_t pfm_no_token_counter;
+    uint32_t fast_reply_to_pfm_sent_counter;
+    uint32_t min_rx_to_tx_us;
+    uint32_t max_rx_to_tx_us;
+    uint32_t avg_rx_to_tx_us;
+    uint32_t token_received_counter;
+    uint32_t token_passed_counter;
+    uint32_t app_frames_sent_with_token_counter;
+    uint32_t app_frames_blocked_no_token_counter;
+    uint32_t bad_crc_counter;
+    uint32_t invalid_counter;
+    uint32_t lost_token_counter;
+} DLMSTP_TOKEN_DIAGNOSTICS;
+
 typedef enum {
     DLMSTP_SEND_STATUS_OK = 0,
     DLMSTP_SEND_STATUS_NO_PORT,
@@ -238,6 +256,10 @@ unsigned dlmstp_send_pdu_queue_depth(void);
 BACNET_STACK_EXPORT
 bool dlmstp_send_pdu_queue_drop_source(DLMSTP_TX_SOURCE source);
 BACNET_STACK_EXPORT
+void dlmstp_send_pdu_priority_next_set(bool enable);
+BACNET_STACK_EXPORT
+void dlmstp_send_priority_queue_clear(void);
+BACNET_STACK_EXPORT
 bool dlmstp_token_held(void);
 BACNET_STACK_EXPORT
 bool dlmstp_can_transmit_now(void);
@@ -248,6 +270,18 @@ BACNET_STACK_EXPORT
 const char *dlmstp_send_status_text(DLMSTP_SEND_STATUS status);
 BACNET_STACK_EXPORT
 const char *dlmstp_tx_source_text(DLMSTP_TX_SOURCE source);
+BACNET_STACK_EXPORT
+bool dlmstp_send_priority_slot_ready(void);
+BACNET_STACK_EXPORT
+const char *dlmstp_send_priority_slot_source_text(void);
+BACNET_STACK_EXPORT
+const char *dlmstp_send_path_last_text(void);
+BACNET_STACK_EXPORT
+bool dlmstp_send_pdu_queue_oldest_source(
+    DLMSTP_TX_SOURCE *source,
+    unsigned long *age_ms);
+BACNET_STACK_EXPORT
+const char *dlmstp_master_state_text(void);
 BACNET_STACK_EXPORT
 bool dlmstp_send_reply_postponed(uint8_t destination_mac);
 
@@ -300,6 +334,10 @@ void dlmstp_reset_statistics(void);
 /* will be copied into *statistics */
 BACNET_STACK_EXPORT
 void dlmstp_fill_statistics(struct dlmstp_statistics *statistics);
+
+BACNET_STACK_EXPORT
+void dlmstp_token_diagnostics_fill_and_reset(
+    struct dlmstp_token_diagnostics *diagnostics);
 
 #ifdef __cplusplus
 }

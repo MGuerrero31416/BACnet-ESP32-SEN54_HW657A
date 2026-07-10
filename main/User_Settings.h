@@ -16,6 +16,18 @@
 #define USER_BACNET_ROUTED_COMPAT_MAX_APDU 128U
 #endif
 
+#ifndef USER_BACNET_BACROUTER_DISCOVERY_COMPAT
+#define USER_BACNET_BACROUTER_DISCOVERY_COMPAT 1
+#endif
+
+#ifndef USER_MSTP_ACTIVE_DEBUG_ONLY
+#define USER_MSTP_ACTIVE_DEBUG_ONLY 1
+#endif
+
+#ifndef USER_MSTP_TOKEN_DEBUG_ONLY
+#define USER_MSTP_TOKEN_DEBUG_ONLY USER_MSTP_ACTIVE_DEBUG_ONLY
+#endif
+
 /* WiFi settings */
 extern const bool USER_ENABLE_BACNET_IP;
 extern const char USER_WIFI_SSID[];
@@ -60,6 +72,8 @@ extern const uint32_t USER_MSTP_BAUD_RATE;
 extern const bool USER_MSTP_AUTO_BAUD;
 extern const uint16_t USER_BACNET_MSTP_MAX_APDU;
 extern const bool USER_MSTP_ENABLE_REPLY_POSTPONED;
+extern const bool USER_BACNET_LOG_REMOTE_I_AM;
+extern const bool USER_BACNET_DISCOVERY_LOG_VERBOSE;
 
 /* BACnet object defaults */
 #define USER_AV_COUNT 7

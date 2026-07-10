@@ -33,6 +33,7 @@
 #include "bacnet/basic/services.h"
 #include "bacnet/basic/sys/debug.h"
 #include "bacnet/datalink/datalink.h"
+#include "bacnet/datalink/dlmstp.h"
 
 #ifndef USER_BACNET_ROUTED_COMPAT_MODE
 #define USER_BACNET_ROUTED_COMPAT_MODE 0
@@ -43,6 +44,40 @@
 #endif
 
 static const char *RPM_COMPAT_TAG = "rpm_compat";
+
+typedef struct {
+    BACNET_OBJECT_TYPE object_type;
+    uint32_t object_instance;
+    BACNET_PROPERTY_ID object_property;
+    uint32_t array_index;
+    int result_len;
+    int encoded_apdu_len;
+} ADX_RPM_DIAG_ENTRY;
+
+#define ADX_RPM_DIAG_MAX 64U
+
+static bool rpm_is_adx_request(const BACNET_ADDRESS *src)
+{
+    return src && (src->mac_len > 0U) && (src->mac[0] == 0U);
+}
+
+static const char *rpm_result_name(int len)
+{
+    if (len >= 0) {
+        return "ACK";
+    }
+    if (len == BACNET_STATUS_ABORT) {
+        return "Abort";
+    }
+    if (len == BACNET_STATUS_ERROR) {
+        return "Error";
+    }
+    if (len == BACNET_STATUS_REJECT) {
+        return "Reject";
+    }
+
+    return "Unknown";
+}
 
 static uint8_t Temp_Buf[MAX_APDU] = { 0 };
 
@@ -129,11 +164,19 @@ static unsigned RPM_Object_Property_Count(
  * encoding.
  */
 static int RPM_Encode_Property(
-    uint8_t *apdu, uint16_t offset, uint16_t max_apdu, BACNET_RPM_DATA *rpmdata)
+    uint8_t *apdu,
+    uint16_t offset,
+    uint16_t max_apdu,
+    BACNET_RPM_DATA *rpmdata,
+    bool adx_request,
+    ADX_RPM_DIAG_ENTRY *diag_entries,
+    unsigned *diag_count,
+    unsigned *diag_dropped)
 {
     int len = 0;
     size_t copy_len = 0;
     int apdu_len = 0;
+    int result_len = BACNET_STATUS_ERROR;
     BACNET_READ_PROPERTY_DATA rpdata;
 
     len = rpm_ack_encode_apdu_object_property(
@@ -164,6 +207,35 @@ static int RPM_Encode_Property(
         len = Device_Read_Property(&rpdata);
     }
 
+    result_len = len;
+    if (adx_request && (result_len == BACNET_STATUS_ERROR) &&
+        ((rpdata.error_code == ERROR_CODE_UNKNOWN_PROPERTY) ||
+            (rpdata.error_code == ERROR_CODE_UNKNOWN_OBJECT))) {
+        ESP_LOGW(
+            "adx_diag",
+            "unsupported property obj=%u:%lu property=%lu error_class=%u error_code=%u",
+            (unsigned)rpdata.object_type,
+            (unsigned long)rpdata.object_instance,
+            (unsigned long)rpdata.object_property,
+            (unsigned)rpdata.error_class,
+            (unsigned)rpdata.error_code);
+    }
+
+
+    if (adx_request && diag_entries && diag_count && diag_dropped) {
+        if (*diag_count < ADX_RPM_DIAG_MAX) {
+            ADX_RPM_DIAG_ENTRY *entry = &diag_entries[*diag_count];
+            entry->object_type = rpmdata->object_type;
+            entry->object_instance = rpmdata->object_instance;
+            entry->object_property = rpmdata->object_property;
+            entry->array_index = rpmdata->array_index;
+            entry->result_len = result_len;
+            entry->encoded_apdu_len = apdu_len;
+            (*diag_count)++;
+        } else {
+            (*diag_dropped)++;
+        }
+    }
     if (len < 0) {
         if ((len == BACNET_STATUS_ABORT) || (len == BACNET_STATUS_REJECT)) {
             rpmdata->error_code = rpdata.error_code;
@@ -232,6 +304,11 @@ void handler_read_property_multiple(
     int npdu_len = 0;
     int error = 0;
     uint16_t max_apdu_limit = MAX_APDU;
+    bool adx_request = rpm_is_adx_request(src);
+    ADX_RPM_DIAG_ENTRY diag_entries[ADX_RPM_DIAG_MAX] = { 0 };
+    unsigned diag_count = 0;
+    unsigned diag_dropped = 0;
+    unsigned diag_index = 0;
 
     if (service_data) {
         max_apdu_limit = (uint16_t)service_data->max_resp;
@@ -339,7 +416,9 @@ void handler_read_property_multiple(
                                 rpmdata.object_type, rpmdata.object_instance)) {
                             len = RPM_Encode_Property(
                                 &Handler_Transmit_Buffer[npdu_len],
-                                (uint16_t)apdu_len, max_apdu_limit, &rpmdata);
+                                (uint16_t)apdu_len, max_apdu_limit, &rpmdata,
+                                adx_request, diag_entries, &diag_count,
+                                &diag_dropped);
                             if (len > 0) {
                                 apdu_len += len;
                             } else {
@@ -415,7 +494,8 @@ void handler_read_property_multiple(
                                     len = RPM_Encode_Property(
                                         &Handler_Transmit_Buffer[npdu_len],
                                         (uint16_t)apdu_len, max_apdu_limit,
-                                        &rpmdata);
+                                        &rpmdata, adx_request, diag_entries,
+                                        &diag_count, &diag_dropped);
                                     if (len > 0) {
                                         apdu_len += len;
                                     } else {
@@ -438,7 +518,8 @@ void handler_read_property_multiple(
                                     len = RPM_Encode_Property(
                                         &Handler_Transmit_Buffer[npdu_len],
                                         (uint16_t)apdu_len, max_apdu_limit,
-                                        &rpmdata);
+                                        &rpmdata, adx_request, diag_entries,
+                                        &diag_count, &diag_dropped);
                                     if (len > 0) {
                                         apdu_len += len;
                                     } else {
@@ -457,7 +538,9 @@ void handler_read_property_multiple(
                         /* handle an individual property */
                         len = RPM_Encode_Property(
                             &Handler_Transmit_Buffer[npdu_len],
-                            (uint16_t)apdu_len, max_apdu_limit, &rpmdata);
+                            (uint16_t)apdu_len, max_apdu_limit, &rpmdata,
+                            adx_request, diag_entries, &diag_count,
+                            &diag_dropped);
                         if (len > 0) {
                             apdu_len += len;
                         } else {
@@ -547,7 +630,49 @@ void handler_read_property_multiple(
         pdu_len = apdu_len + npdu_len;
         bytes_sent = datalink_send_pdu(
             src, &npdu_data, &Handler_Transmit_Buffer[0], pdu_len);
+
+        if (adx_request) {
+            for (diag_index = 0; diag_index < diag_count; diag_index++) {
+                ESP_LOGI(
+                    "adx_diag",
+                    "invoke=%u service=%u obj=%u:%lu property=%lu array=%lu result=%s apdu_len=%d tx_ret=%d",
+                    (unsigned)service_data->invoke_id,
+                    (unsigned)SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
+                    (unsigned)diag_entries[diag_index].object_type,
+                    (unsigned long)diag_entries[diag_index].object_instance,
+                    (unsigned long)diag_entries[diag_index].object_property,
+                    (unsigned long)diag_entries[diag_index].array_index,
+                    rpm_result_name(diag_entries[diag_index].result_len),
+                    diag_entries[diag_index].encoded_apdu_len,
+                    bytes_sent);
+            }
+            if (diag_dropped > 0U) {
+                ESP_LOGW(
+                    "adx_diag",
+                    "invoke=%u service=%u diag_entries_dropped=%u",
+                    (unsigned)service_data->invoke_id,
+                    (unsigned)SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
+                    diag_dropped);
+            }
+        }
+
         if (bytes_sent <= 0) {
+            ESP_LOGE(
+                "rpm_tx",
+                "confirmed response TX FAILED invoke=%u service=%u object=%u:%lu property=%lu tx_ret=%d queue_depth=%u high_priority_slot_state=%s master_state=%s token=%s can_tx=%s send_status=%s send_path=%s",
+                (unsigned)service_data->invoke_id,
+                (unsigned)SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
+                (unsigned)rpmdata.object_type,
+                (unsigned long)rpmdata.object_instance,
+                (unsigned long)rpmdata.object_property,
+                bytes_sent,
+                dlmstp_send_pdu_queue_depth(),
+                dlmstp_send_priority_slot_ready() ? dlmstp_send_priority_slot_source_text() : "empty",
+                dlmstp_master_state_text(),
+                dlmstp_token_held() ? "yes" : "no",
+                dlmstp_can_transmit_now() ? "yes" : "no",
+                dlmstp_send_status_text(dlmstp_send_status_last()),
+                dlmstp_send_path_last_text());
             debug_perror("RPM: Failed to send PDU");
         }
     }

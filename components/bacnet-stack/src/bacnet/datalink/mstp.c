@@ -34,6 +34,14 @@
 #include "bacnet/npdu.h"
 #include "bacnet/basic/sys/debug.h"
 
+#ifndef USER_MSTP_TOKEN_PASS_ONLY_DEBUG
+#define USER_MSTP_TOKEN_PASS_ONLY_DEBUG 0
+#endif
+
+#ifndef USER_MSTP_DEBUG_FORCE_NEXT_STATION
+#define USER_MSTP_DEBUG_FORCE_NEXT_STATION 255
+#endif
+
 #if PRINT_ENABLED
 #undef PRINT_ENABLED_RECEIVE
 #undef PRINT_ENABLED_RECEIVE_DATA
@@ -723,6 +731,20 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
                             MSTP_BROADCAST_ADDRESS) {
                             break;
                         }
+                        if ((mstp_port->Next_Station == mstp_port->This_Station) &&
+                            (USER_MSTP_DEBUG_FORCE_NEXT_STATION <= mstp_port->Nmax_master) &&
+                            (USER_MSTP_DEBUG_FORCE_NEXT_STATION != mstp_port->This_Station)) {
+                            mstp_port->Next_Station = USER_MSTP_DEBUG_FORCE_NEXT_STATION;
+                        } else if ((mstp_port->Next_Station == mstp_port->This_Station) &&
+                            (mstp_port->SourceAddress != mstp_port->This_Station) &&
+                            (mstp_port->SourceAddress <= mstp_port->Nmax_master)) {
+                            /*
+                               If we were invited into the ring and don't yet
+                               know a successor, seed successor from token source
+                               so token pass can proceed on first ownership.
+                             */
+                            mstp_port->Next_Station = mstp_port->SourceAddress;
+                        }
                         mstp_port->ReceivedValidFrame = false;
                         mstp_port->FrameCount = 0;
                         mstp_port->SoleMaster = false;
@@ -807,7 +829,11 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
             /* more data frames. These may be BACnet Data frames or */
             /* proprietary frames. */
             /* FIXME: We could wait for up to Tusage_delay */
+#if USER_MSTP_TOKEN_PASS_ONLY_DEBUG
+            length = 0;
+#else
             length = (unsigned)MSTP_Get_Send(mstp_port, 0);
+#endif
             if (length < 1) {
                 /* NothingToSend */
                 mstp_port->FrameCount = mstp_port->Nmax_info_frames;
@@ -918,6 +944,31 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
         case MSTP_MASTER_STATE_DONE_WITH_TOKEN:
             /* The DONE_WITH_TOKEN state either sends another data frame,  */
             /* passes the token, or initiates a Poll For Master cycle. */
+#if USER_MSTP_TOKEN_PASS_ONLY_DEBUG
+            {
+                uint8_t forced_station = USER_MSTP_DEBUG_FORCE_NEXT_STATION;
+
+                if ((forced_station <= mstp_port->Nmax_master) &&
+                    (forced_station != mstp_port->This_Station)) {
+                    mstp_port->Next_Station = forced_station;
+                } else if ((mstp_port->SourceAddress != mstp_port->This_Station) &&
+                    (mstp_port->SourceAddress <= mstp_port->Nmax_master)) {
+                    mstp_port->Next_Station = mstp_port->SourceAddress;
+                } else {
+                    mstp_port->Next_Station = next_this_station;
+                }
+
+                mstp_port->TokenCount++;
+                MSTP_Create_And_Send_Frame(
+                    mstp_port, FRAME_TYPE_TOKEN, mstp_port->Next_Station,
+                    mstp_port->This_Station, NULL, 0);
+                mstp_port->RetryCount = 0;
+                mstp_port->EventCount = 0;
+                mstp_port->master_state = MSTP_MASTER_STATE_PASS_TOKEN;
+                transition_now = true;
+                break;
+            }
+#endif
             /* SendAnotherFrame */
             if (mstp_port->FrameCount < mstp_port->Nmax_info_frames) {
                 /* then this node may send another information frame  */
@@ -927,15 +978,31 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
             } else if (
                 (mstp_port->SoleMaster == false) &&
                 (mstp_port->Next_Station == mstp_port->This_Station)) {
-                /* NextStationUnknown - added in Addendum 135-2008v-1 */
-                /*  then the next station to which the token
-                   should be sent is unknown - so PollForMaster */
-                mstp_port->Poll_Station = next_this_station;
+                /*
+                   NextStationUnknown.
+                   Always pass token after use. For MAC17 testing, prefer MAC32
+                   as successor when unknown.
+                 */
+                uint8_t fallback_next_station = mstp_port->This_Station;
+
+                if ((mstp_port->This_Station == 17U) &&
+                    (32U <= mstp_port->Nmax_master)) {
+                    fallback_next_station = 32U;
+                } else if ((mstp_port->SourceAddress != mstp_port->This_Station) &&
+                    (mstp_port->SourceAddress <= mstp_port->Nmax_master)) {
+                    fallback_next_station = mstp_port->SourceAddress;
+                } else {
+                    fallback_next_station = next_this_station;
+                }
+
+                mstp_port->Next_Station = fallback_next_station;
+                mstp_port->TokenCount++;
                 MSTP_Create_And_Send_Frame(
-                    mstp_port, FRAME_TYPE_POLL_FOR_MASTER,
-                    mstp_port->Poll_Station, mstp_port->This_Station, NULL, 0);
+                    mstp_port, FRAME_TYPE_TOKEN, mstp_port->Next_Station,
+                    mstp_port->This_Station, NULL, 0);
                 mstp_port->RetryCount = 0;
-                mstp_port->master_state = MSTP_MASTER_STATE_POLL_FOR_MASTER;
+                mstp_port->EventCount = 0;
+                mstp_port->master_state = MSTP_MASTER_STATE_PASS_TOKEN;
             } else if (mstp_port->TokenCount < (Npoll - 1)) {
                 /* Npoll changed in Errata SSPC-135-2004 */
                 if ((mstp_port->SoleMaster == true) &&

@@ -4,6 +4,7 @@
 #include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "bacnet/npdu.h"
@@ -26,6 +27,22 @@
 #define MSTP_RS485_DE_PRE_TX_GUARD_MS 1
 #define MSTP_RS485_DE_POST_TX_GUARD_MS 1
 
+#ifndef USER_MSTP_PFM_REPLY_PRE_DELAY_US
+#define USER_MSTP_PFM_REPLY_PRE_DELAY_US 0
+#endif
+
+#ifndef USER_RS485_DE_PRE_TX_US
+#define USER_RS485_DE_PRE_TX_US 1000
+#endif
+
+#ifndef USER_MSTP_TOKEN_PASS_ONLY_DEBUG
+#define USER_MSTP_TOKEN_PASS_ONLY_DEBUG 0
+#endif
+
+#ifndef USER_MSTP_TOKEN_PASS_PRE_DELAY_US
+#define USER_MSTP_TOKEN_PASS_PRE_DELAY_US 0
+#endif
+
 #ifndef BACNET_MSTP_TX_HEX_DEBUG
 #define BACNET_MSTP_TX_HEX_DEBUG 0
 #endif
@@ -43,6 +60,15 @@
 #define MSTP_RS485_DE_ACTIVE_HIGH 1
 #endif
 
+/* Temporary low-noise mode for MAC25 active debugging. */
+#ifndef MSTP_MAC25_MIN_LOG_MODE
+#if defined(USER_MSTP_ACTIVE_DEBUG_ONLY)
+#define MSTP_MAC25_MIN_LOG_MODE USER_MSTP_ACTIVE_DEBUG_ONLY
+#else
+#define MSTP_MAC25_MIN_LOG_MODE 1
+#endif
+#endif
+
 _Static_assert(MSTP_UART_DE_PIN == GPIO_NUM_5, "Expected DE pin GPIO5");
 
 static const char *TAG = "mstp_rs485";
@@ -55,6 +81,11 @@ static volatile uint32_t mstp_preamble_55 = 0;
 static volatile uint32_t mstp_preamble_55ff = 0;
 static uint8_t mstp_prev_byte = 0;
 static volatile uint32_t mstp_tx_frame_count = 0;
+static volatile uint64_t mstp_pfm_rx_timestamp_us = 0;
+static volatile uint64_t mstp_token_rx_timestamp_us = 0;
+static MSTP_RS485_PFM_REPLY_TIMING mstp_last_pfm_reply_timing = { 0 };
+static MSTP_RS485_TOKEN_PASS_TIMING mstp_last_token_pass_timing = { 0 };
+static volatile int mstp_last_uart_result = 0;
 
 typedef struct {
     bool valid;
@@ -340,6 +371,45 @@ static TickType_t mstp_uart_tx_wait_ticks_for_frame(uint16_t total_len)
     return ticks;
 }
 
+void MSTP_RS485_PFM_RX_Timestamp_Set(uint64_t rx_timestamp_us)
+{
+    mstp_pfm_rx_timestamp_us = rx_timestamp_us;
+}
+
+void MSTP_RS485_Token_RX_Timestamp_Set(uint64_t rx_timestamp_us)
+{
+    mstp_token_rx_timestamp_us = rx_timestamp_us;
+}
+
+bool MSTP_RS485_PFM_Reply_Timing_Get_Reset(MSTP_RS485_PFM_REPLY_TIMING *timing)
+{
+    if (!timing || !mstp_last_pfm_reply_timing.valid) {
+        return false;
+    }
+
+    *timing = mstp_last_pfm_reply_timing;
+    memset(&mstp_last_pfm_reply_timing, 0, sizeof(mstp_last_pfm_reply_timing));
+
+    return true;
+}
+
+int MSTP_RS485_Last_UART_Result_Get(void)
+{
+    return mstp_last_uart_result;
+}
+
+bool MSTP_RS485_Token_Pass_Timing_Get_Reset(MSTP_RS485_TOKEN_PASS_TIMING *timing)
+{
+    if (!timing || !mstp_last_token_pass_timing.valid) {
+        return false;
+    }
+
+    *timing = mstp_last_token_pass_timing;
+    memset(&mstp_last_token_pass_timing, 0, sizeof(mstp_last_token_pass_timing));
+
+    return true;
+}
+
 #if BACNET_MSTP_TX_HEX_DEBUG
 static void mstp_log_hex_frame_full(const uint8_t *payload, uint16_t payload_len)
 {
@@ -420,15 +490,17 @@ void MSTP_RS485_Init(void)
     mstp_last_activity_us = esp_timer_get_time();
     mstp_uart_initialized = true;
 
-    ESP_LOGI(
-        TAG,
-        "MS/TP UART initialized on TX=%d RX=%d DE=%d @%lu baud rs485_phy_enabled=%d de_active_high=%d",
-        (int)MSTP_UART_TX_PIN,
-        (int)MSTP_UART_RX_PIN,
-        (int)MSTP_UART_DE_PIN,
-        (unsigned long)mstp_baud_rate,
-        (int)BOARD_RS485_PHY_ENABLED,
-        (int)MSTP_RS485_DE_ACTIVE_HIGH);
+    if (!MSTP_MAC25_MIN_LOG_MODE) {
+        ESP_LOGI(
+            TAG,
+            "MS/TP UART initialized on TX=%d RX=%d DE=%d @%lu baud rs485_phy_enabled=%d de_active_high=%d",
+            (int)MSTP_UART_TX_PIN,
+            (int)MSTP_UART_RX_PIN,
+            (int)MSTP_UART_DE_PIN,
+            (unsigned long)mstp_baud_rate,
+            (int)BOARD_RS485_PHY_ENABLED,
+            (int)MSTP_RS485_DE_ACTIVE_HIGH);
+    }
 }
 
 void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
@@ -444,6 +516,24 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     int de_level_before_disable = -1;
     int de_level_after_disable = -1;
     TickType_t tx_wait_ticks = 0;
+    bool has_mstp_header = false;
+    uint8_t frame_type = 0xFF;
+    bool is_control_frame = false;
+    bool is_reply_to_pfm = false;
+    bool is_token_frame = false;
+    bool token_pass_only_timing = false;
+    uint32_t de_post_guard_us = 0;
+    bool de_disabled_after_tx_done = false;
+    uint32_t de_pre_delay_us = 0;
+    uint32_t token_pass_pre_delay_us = 0;
+    uint32_t applied_pre_delay_us = 0;
+    bool use_reply_like_de_pre_path = false;
+    int64_t de_enable_time_us = 0;
+    int64_t uart_write_time_us = 0;
+    int64_t tx_done_time_us = 0;
+    int64_t token_pass_start_us = 0;
+    uint64_t pfm_rx_time_us = 0;
+    uint64_t token_rx_time_us = 0;
 
     if (!payload || payload_len == 0) {
         return;
@@ -459,48 +549,256 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
 
     mstp_tx_frame_count++;
 #if MSTP_DEBUG_ENABLE
-    mstp_log_frame_debug(payload, payload_len);
+    if ((payload_len >= 8U) && (payload[0] == 0x55U) && (payload[1] == 0xFFU) &&
+        (payload[2] == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER)) {
+        /* Fast Reply-To-PFM path: no pre-TX logs. */
+    } else {
+        mstp_log_frame_debug(payload, payload_len);
+    }
 #endif
+
+    has_mstp_header = (payload_len >= 8) && (payload[0] == 0x55) && (payload[1] == 0xFF);
+    if (has_mstp_header) {
+        frame_type = payload[2];
+        is_token_frame = (frame_type == FRAME_TYPE_TOKEN);
+        is_control_frame = (frame_type == FRAME_TYPE_TOKEN) ||
+            (frame_type == FRAME_TYPE_POLL_FOR_MASTER) ||
+            (frame_type == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER);
+        is_reply_to_pfm = (frame_type == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER);
+        token_pass_only_timing = USER_MSTP_TOKEN_PASS_ONLY_DEBUG && is_token_frame;
+        use_reply_like_de_pre_path = is_reply_to_pfm || token_pass_only_timing;
+    }
+
     mstp_decode_tx_info(payload, payload_len, &tx_info);
     if (tx_info.valid && tx_info.has_invoke_id) {
         request_meta = mstp_confirmed_find_slot(tx_info.invoke_id);
     }
 
     mstp_tx_in_progress = true;
-    mstp_rs485_set_tx_mode(true);
-    de_level_after_enable = gpio_get_level(MSTP_UART_DE_PIN);
-    vTaskDelay(pdMS_TO_TICKS(MSTP_RS485_DE_PRE_TX_GUARD_MS));
 
-    written = uart_write_bytes(MSTP_UART_PORT, payload, payload_len);
-    if (written < 0) {
-        ESP_LOGE(TAG, "UART write failed");
+    if (token_pass_only_timing) {
+        token_rx_time_us = mstp_token_rx_timestamp_us;
+        token_pass_start_us = esp_timer_get_time();
+        token_pass_pre_delay_us = (uint32_t)USER_MSTP_TOKEN_PASS_PRE_DELAY_US;
+        applied_pre_delay_us = token_pass_pre_delay_us;
+        if (token_pass_pre_delay_us > 0U) {
+            esp_rom_delay_us(token_pass_pre_delay_us);
+        }
+    } else if (is_reply_to_pfm && (USER_MSTP_PFM_REPLY_PRE_DELAY_US > 0)) {
+        applied_pre_delay_us = (uint32_t)USER_MSTP_PFM_REPLY_PRE_DELAY_US;
+        esp_rom_delay_us((uint32_t)USER_MSTP_PFM_REPLY_PRE_DELAY_US);
     }
 
-    tx_wait_ticks = mstp_uart_tx_wait_ticks_for_frame(payload_len);
+    mstp_rs485_set_tx_mode(true);
+    if (use_reply_like_de_pre_path) {
+        de_enable_time_us = esp_timer_get_time();
+        if (is_reply_to_pfm) {
+            pfm_rx_time_us = mstp_pfm_rx_timestamp_us;
+        }
+    }
+    de_level_after_enable = gpio_get_level(MSTP_UART_DE_PIN);
+    if (use_reply_like_de_pre_path) {
+        de_pre_delay_us = (uint32_t)USER_RS485_DE_PRE_TX_US;
+        if (de_pre_delay_us > 0U) {
+            esp_rom_delay_us(de_pre_delay_us);
+        }
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(MSTP_RS485_DE_PRE_TX_GUARD_MS));
+    }
+
+    if (use_reply_like_de_pre_path) {
+        uart_write_time_us = esp_timer_get_time();
+    }
+    if (is_reply_to_pfm && (payload_len >= 8U)) {
+        written = uart_write_bytes(MSTP_UART_PORT, payload, 8);
+    } else {
+        written = uart_write_bytes(MSTP_UART_PORT, payload, payload_len);
+    }
+    if (written < 0) {
+        ESP_LOGE(TAG, "UART write failed");
+        mstp_last_uart_result = written;
+    } else {
+        mstp_last_uart_result = (int)tx_done;
+    }
+
+    if (is_reply_to_pfm && (payload_len >= 8U)) {
+        tx_wait_ticks = mstp_uart_tx_wait_ticks_for_frame(8U);
+    } else {
+        tx_wait_ticks = mstp_uart_tx_wait_ticks_for_frame(payload_len);
+    }
 
     tx_done = uart_wait_tx_done(MSTP_UART_PORT, tx_wait_ticks);
+    if (written >= 0) {
+        mstp_last_uart_result = (int)tx_done;
+    }
+    if (use_reply_like_de_pre_path) {
+        tx_done_time_us = esp_timer_get_time();
+    }
 
-    vTaskDelay(pdMS_TO_TICKS(MSTP_RS485_DE_POST_TX_GUARD_MS));
+    if (is_reply_to_pfm) {
+        de_post_guard_us = 0;
+    } else if (is_control_frame && (tx_done == ESP_OK)) {
+        de_post_guard_us = 0;
+    } else {
+        de_post_guard_us = (uint32_t)MSTP_RS485_DE_POST_TX_GUARD_MS * 1000U;
+        vTaskDelay(pdMS_TO_TICKS(MSTP_RS485_DE_POST_TX_GUARD_MS));
+    }
     de_level_before_disable = gpio_get_level(MSTP_UART_DE_PIN);
+    de_disabled_after_tx_done = (tx_done == ESP_OK);
     mstp_rs485_set_tx_mode(false);
     de_level_after_disable = gpio_get_level(MSTP_UART_DE_PIN);
+
+    if (is_reply_to_pfm) {
+        uint64_t delta_us = 0;
+
+        memset(&mstp_last_pfm_reply_timing, 0, sizeof(mstp_last_pfm_reply_timing));
+        mstp_last_pfm_reply_timing.valid = true;
+        mstp_last_pfm_reply_timing.src = payload[4];
+        mstp_last_pfm_reply_timing.dst = payload[3];
+        mstp_last_pfm_reply_timing.pre_delay_us = (uint32_t)USER_MSTP_PFM_REPLY_PRE_DELAY_US;
+        mstp_last_pfm_reply_timing.de_pre_us = de_pre_delay_us;
+        mstp_last_pfm_reply_timing.tx_done_ok = (tx_done == ESP_OK);
+
+        if ((de_enable_time_us > 0) && (uart_write_time_us >= de_enable_time_us)) {
+            delta_us = (uint64_t)(uart_write_time_us - de_enable_time_us);
+            if (delta_us > 0xFFFFFFFFULL) {
+                delta_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_pfm_reply_timing.de_enable_to_uart_write_us = (uint32_t)delta_us;
+        }
+        if ((uart_write_time_us > 0) && (tx_done_time_us >= uart_write_time_us)) {
+            delta_us = (uint64_t)(tx_done_time_us - uart_write_time_us);
+            if (delta_us > 0xFFFFFFFFULL) {
+                delta_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_pfm_reply_timing.uart_write_to_tx_done_us = (uint32_t)delta_us;
+        }
+        if (pfm_rx_time_us > 0) {
+            if ((de_enable_time_us > 0) && ((uint64_t)de_enable_time_us >= pfm_rx_time_us)) {
+                delta_us = ((uint64_t)de_enable_time_us - pfm_rx_time_us);
+                if (delta_us > 0xFFFFFFFFULL) {
+                    delta_us = 0xFFFFFFFFULL;
+                }
+                mstp_last_pfm_reply_timing.pfm_rx_to_de_enable_us = (uint32_t)delta_us;
+            }
+            if ((uart_write_time_us > 0) && ((uint64_t)uart_write_time_us >= pfm_rx_time_us)) {
+                delta_us = ((uint64_t)uart_write_time_us - pfm_rx_time_us);
+                if (delta_us > 0xFFFFFFFFULL) {
+                    delta_us = 0xFFFFFFFFULL;
+                }
+                mstp_last_pfm_reply_timing.pfm_rx_to_uart_write_us = (uint32_t)delta_us;
+            }
+            if ((tx_done_time_us > 0) && ((uint64_t)tx_done_time_us >= pfm_rx_time_us)) {
+                delta_us = ((uint64_t)tx_done_time_us - pfm_rx_time_us);
+                if (delta_us > 0xFFFFFFFFULL) {
+                    delta_us = 0xFFFFFFFFULL;
+                }
+                mstp_last_pfm_reply_timing.total_pfm_rx_to_tx_done_us = (uint32_t)delta_us;
+            }
+        }
+    }
+
+    if (token_pass_only_timing && has_mstp_header && (payload_len >= 8U)) {
+        uint64_t delta_us = 0;
+        uint64_t total_us = 0;
+
+        memset(&mstp_last_token_pass_timing, 0, sizeof(mstp_last_token_pass_timing));
+        mstp_last_token_pass_timing.valid = true;
+        mstp_last_token_pass_timing.src = payload[4];
+        mstp_last_token_pass_timing.dst = payload[3];
+        mstp_last_token_pass_timing.pre_delay_us = applied_pre_delay_us;
+        mstp_last_token_pass_timing.de_pre_us = de_pre_delay_us;
+        mstp_last_token_pass_timing.tx_done_ok = (tx_done == ESP_OK);
+        mstp_last_token_pass_timing.uart_ret = written;
+
+        if ((token_rx_time_us > 0U) &&
+            (de_enable_time_us > 0) &&
+            ((uint64_t)de_enable_time_us >= token_rx_time_us)) {
+            delta_us = (uint64_t)de_enable_time_us - token_rx_time_us;
+            if (delta_us > 0xFFFFFFFFULL) {
+                delta_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_token_pass_timing.rx_to_de_us = (uint32_t)delta_us;
+        }
+
+        if ((de_enable_time_us > 0) && (uart_write_time_us >= de_enable_time_us)) {
+            delta_us = (uint64_t)(uart_write_time_us - de_enable_time_us);
+            if (delta_us > 0xFFFFFFFFULL) {
+                delta_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_token_pass_timing.de_to_write_us = (uint32_t)delta_us;
+        }
+
+        if ((token_rx_time_us > 0U) &&
+            (uart_write_time_us > 0) &&
+            ((uint64_t)uart_write_time_us >= token_rx_time_us)) {
+            delta_us = (uint64_t)uart_write_time_us - token_rx_time_us;
+            if (delta_us > 0xFFFFFFFFULL) {
+                delta_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_token_pass_timing.rx_to_write_us = (uint32_t)delta_us;
+        }
+
+        if ((uart_write_time_us > 0) && (tx_done_time_us >= uart_write_time_us)) {
+            delta_us = (uint64_t)(tx_done_time_us - uart_write_time_us);
+            if (delta_us > 0xFFFFFFFFULL) {
+                delta_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_token_pass_timing.write_to_done_us = (uint32_t)delta_us;
+        }
+
+        if ((token_rx_time_us > 0U) &&
+            (tx_done_time_us > 0) &&
+            ((uint64_t)tx_done_time_us >= token_rx_time_us)) {
+            total_us = (uint64_t)tx_done_time_us - token_rx_time_us;
+        } else if ((token_pass_start_us > 0) && (tx_done_time_us >= token_pass_start_us)) {
+            total_us = (uint64_t)(tx_done_time_us - token_pass_start_us);
+        }
+
+        if (total_us > 0U) {
+            if (total_us > 0xFFFFFFFFULL) {
+                total_us = 0xFFFFFFFFULL;
+            }
+            mstp_last_token_pass_timing.total_us = (uint32_t)total_us;
+        }
+    }
+
+    if (has_mstp_header) {
+        if (!MSTP_MAC25_MIN_LOG_MODE) {
+            ESP_LOGI(
+                TAG,
+                "mstp_tx_turnaround frame_type=%u is_control_frame=%s de_pre_us=%lu de_post_guard_us=%lu de_disabled_after_tx_done=%s dst=%u src=%u uart_wait_tx_done=%s",
+                (unsigned)frame_type,
+                is_control_frame ? "yes" : "no",
+                (unsigned long)de_pre_delay_us,
+                (unsigned long)de_post_guard_us,
+                de_disabled_after_tx_done ? "yes" : "no",
+                (unsigned)payload[3],
+                (unsigned)payload[4],
+                esp_err_to_name(tx_done));
+        }
+
+        (void)is_reply_to_pfm;
+    }
 
     if (tx_info.valid &&
         tx_info.is_data_frame &&
         (tx_info.frame_type == FRAME_TYPE_BACNET_DATA_NOT_EXPECTING_REPLY)) {
-        ESP_LOGI(
-            TAG,
-            "mstp TX frame=%u dst=%u src=%u data_len=%u total_len=%u uart_write_ret=%d uart_wait_tx_done=%s de_en=%d de_pre_dis=%d de_dis=%d",
-            (unsigned)tx_info.frame_type,
-            (unsigned)payload[3],
-            (unsigned)payload[4],
-            (unsigned)tx_info.mstp_data_len,
-            (unsigned)payload_len,
-            written,
-            esp_err_to_name(tx_done),
-            de_level_after_enable,
-            de_level_before_disable,
-            de_level_after_disable);
+        if (!MSTP_MAC25_MIN_LOG_MODE) {
+            ESP_LOGI(
+                TAG,
+                "mstp TX frame=%u dst=%u src=%u data_len=%u total_len=%u uart_write_ret=%d uart_wait_tx_done=%s de_en=%d de_pre_dis=%d de_dis=%d",
+                (unsigned)tx_info.frame_type,
+                (unsigned)payload[3],
+                (unsigned)payload[4],
+                (unsigned)tx_info.mstp_data_len,
+                (unsigned)payload_len,
+                written,
+                esp_err_to_name(tx_done),
+                de_level_after_enable,
+                de_level_before_disable,
+                de_level_after_disable);
+        }
     }
 
 #if BACNET_MSTP_TX_HEX_DEBUG
@@ -565,22 +863,24 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
                     request_meta->reply_postponed_tx_us - request_meta->request_rx_us;
             }
 
-            ESP_LOGI(
-                TAG,
-                "final response sent invoke=%u requester_mac=%u service=%u object=%u:%lu property=%lu array=%lu reply_postponed=%s req_to_postponed_ms=%ld req_to_final_ms=%ld pdu=0x%02X tx_ret=%d tx_done=%d",
-                (unsigned)request_meta->invoke_id,
-                (unsigned)request_meta->requester_mac,
-                (unsigned)request_meta->service_choice,
-                (unsigned)request_meta->object_type,
-                (unsigned long)request_meta->object_instance,
-                (unsigned long)request_meta->object_property,
-                (unsigned long)request_meta->array_index,
-                request_meta->reply_postponed_sent ? "yes" : "no",
-                (long)(request_to_postponed_us >= 0 ? request_to_postponed_us / 1000 : -1),
-                (long)(request_to_final_us >= 0 ? request_to_final_us / 1000 : -1),
-                (unsigned)tx_info.pdu_type,
-                written,
-                (int)tx_done);
+            if (!MSTP_MAC25_MIN_LOG_MODE) {
+                ESP_LOGI(
+                    TAG,
+                    "final response sent invoke=%u requester_mac=%u service=%u object=%u:%lu property=%lu array=%lu reply_postponed=%s req_to_postponed_ms=%ld req_to_final_ms=%ld pdu=0x%02X tx_ret=%d tx_done=%d",
+                    (unsigned)request_meta->invoke_id,
+                    (unsigned)request_meta->requester_mac,
+                    (unsigned)request_meta->service_choice,
+                    (unsigned)request_meta->object_type,
+                    (unsigned long)request_meta->object_instance,
+                    (unsigned long)request_meta->object_property,
+                    (unsigned long)request_meta->array_index,
+                    request_meta->reply_postponed_sent ? "yes" : "no",
+                    (long)(request_to_postponed_us >= 0 ? request_to_postponed_us / 1000 : -1),
+                    (long)(request_to_final_us >= 0 ? request_to_final_us / 1000 : -1),
+                    (unsigned)tx_info.pdu_type,
+                    written,
+                    (int)tx_done);
+            }
 
             memset(request_meta, 0, sizeof(*request_meta));
         }

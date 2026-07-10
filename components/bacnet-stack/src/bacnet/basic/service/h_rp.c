@@ -167,6 +167,38 @@ static void object_list_debug_log_response(
     }
 }
 
+static const char *rp_result_name(int len)
+{
+    if (len >= 0) {
+        return "ACK";
+    }
+    if (len == BACNET_STATUS_ABORT) {
+        return "Abort";
+    }
+    if (len == BACNET_STATUS_ERROR) {
+        return "Error";
+    }
+    if (len == BACNET_STATUS_REJECT) {
+        return "Reject";
+    }
+
+    return "Unknown";
+}
+
+static bool rp_is_device_vendor_identifier_request(
+    const BACNET_READ_PROPERTY_DATA *rpdata)
+{
+    return rpdata &&
+        (rpdata->object_type == OBJECT_DEVICE) &&
+        (rpdata->object_property == PROP_VENDOR_IDENTIFIER) &&
+        (rpdata->array_index == BACNET_ARRAY_ALL);
+}
+
+static bool rp_is_adx_request(const BACNET_ADDRESS *src)
+{
+    return src && (src->mac_len > 0U) && (src->mac[0] == 0U);
+}
+
 /** Handler for a ReadProperty Service request.
  * @ingroup DSRP
  * This handler will be invoked by apdu_handler() if it has been enabled
@@ -192,7 +224,7 @@ void handler_read_property(
     BACNET_ADDRESS *src,
     BACNET_CONFIRMED_SERVICE_DATA *service_data)
 {
-    BACNET_READ_PROPERTY_DATA rpdata;
+    BACNET_READ_PROPERTY_DATA rpdata = { 0 };
     int len = 0;
     int pdu_len = 0;
     int apdu_len = -1;
@@ -202,6 +234,10 @@ void handler_read_property(
     bool error = true; /* assume that there is an error */
     int bytes_sent = 0;
     BACNET_ADDRESS my_address;
+    bool rp_decoded = false;
+    bool rp_is_device = false;
+    const char *rp_result = "Unknown";
+    bool adx_request = rp_is_adx_request(src);
 
     /* configure default error code as an abort since it is common */
     rpdata.error_code = ERROR_CODE_ABORT_SEGMENTATION_NOT_SUPPORTED;
@@ -225,7 +261,12 @@ void handler_read_property(
     } else {
         len = rp_decode_service_request(service_request, service_len, &rpdata);
         if (len <= 0) {
+            len = BACNET_STATUS_REJECT;
+            rpdata.error_code = ERROR_CODE_REJECT_INVALID_TAG;
+            debug_print("RP: Invalid service decode. Sending Reject!\n");
         } else {
+            rp_decoded = true;
+            rp_is_device = (rpdata.object_type == OBJECT_DEVICE);
             if (object_list_debug_target(&rpdata)) {
                 object_list_debug_log_request(
                     service_data->invoke_id, rpdata.array_index);
@@ -279,6 +320,15 @@ void handler_read_property(
                     (unsigned)service_data->invoke_id);
             } else {
                 len = Device_Read_Property(&rpdata);
+                if ((len < 0) && rp_is_device_vendor_identifier_request(&rpdata)) {
+                    len = encode_application_unsigned(
+                        rpdata.application_data, Device_Vendor_Identifier());
+                    if (len <= 0) {
+                        rpdata.error_class = ERROR_CLASS_SERVICES;
+                        rpdata.error_code = ERROR_CODE_ABORT_OTHER;
+                        len = BACNET_STATUS_ABORT;
+                    }
+                }
             }
             if (len >= 0) {
                 apdu_len += len;
@@ -303,6 +353,7 @@ void handler_read_property(
             }
         }
     }
+    rp_result = rp_result_name(len);
     if (error) {
         if (len == BACNET_STATUS_ABORT) {
             apdu_len = abort_encode_apdu(
@@ -341,9 +392,42 @@ void handler_read_property(
                     true);
             }
 #endif
+        } else {
+            apdu_len = abort_encode_apdu(
+                &Handler_Transmit_Buffer[npdu_len], service_data->invoke_id,
+                ABORT_REASON_OTHER, true);
+            len = BACNET_STATUS_ABORT;
+            rp_result = rp_result_name(len);
+            debug_print("RP: Unexpected failure state. Sending Abort!\n");
         }
     }
     pdu_len = npdu_len + apdu_len;
+
+    if (adx_request && rp_decoded &&
+        (len == BACNET_STATUS_ERROR) &&
+        ((rpdata.error_code == ERROR_CODE_UNKNOWN_PROPERTY) ||
+            (rpdata.error_code == ERROR_CODE_UNKNOWN_OBJECT))) {
+        ESP_LOGW(
+            "adx_diag",
+            "unsupported property obj=%u:%lu property=%lu error_class=%u error_code=%u",
+            (unsigned)rpdata.object_type,
+            (unsigned long)rpdata.object_instance,
+            (unsigned long)rpdata.object_property,
+            (unsigned)rpdata.error_class,
+            (unsigned)rpdata.error_code);
+    }
+
+    if (rp_decoded && rp_is_device) {
+        ESP_LOGI(
+            "rp_device",
+            "read-property obj=%u:%lu property=%lu array=%lu result=%s apdu_len=%d",
+            (unsigned)rpdata.object_type,
+            (unsigned long)rpdata.object_instance,
+            (unsigned long)rpdata.object_property,
+            (unsigned long)rpdata.array_index,
+            rp_result,
+            apdu_len);
+    }
 
 #if RP_TX_PATH_DEBUG
     if (object_list_debug_target(&rpdata)) {
@@ -354,6 +438,52 @@ void handler_read_property(
 
     bytes_sent = datalink_send_pdu(
         src, &npdu_data, &Handler_Transmit_Buffer[0], pdu_len);
+
+    if (rp_decoded && (bytes_sent > 0)) {
+        ESP_LOGI(
+            "rp_tx",
+            "final response invoke=%u object=%u:%lu property=%lu tx_ret=%d",
+            (unsigned)service_data->invoke_id,
+            (unsigned)rpdata.object_type,
+            (unsigned long)rpdata.object_instance,
+            (unsigned long)rpdata.object_property,
+            bytes_sent);
+    }
+
+    if (bytes_sent <= 0) {
+        ESP_LOGE(
+            "rp_tx",
+            "confirmed response TX FAILED invoke=%u service=%u object=%u:%lu property=%lu result=%s tx_ret=%d queue_depth=%u high_priority_slot_state=%s master_state=%s token=%s can_tx=%s send_status=%s send_path=%s",
+            (unsigned)service_data->invoke_id,
+            (unsigned)SERVICE_CONFIRMED_READ_PROPERTY,
+            (unsigned)rpdata.object_type,
+            (unsigned long)rpdata.object_instance,
+            (unsigned long)rpdata.object_property,
+            rp_result,
+            bytes_sent,
+            dlmstp_send_pdu_queue_depth(),
+            dlmstp_send_priority_slot_ready() ? dlmstp_send_priority_slot_source_text() : "empty",
+            dlmstp_master_state_text(),
+            dlmstp_token_held() ? "yes" : "no",
+            dlmstp_can_transmit_now() ? "yes" : "no",
+            dlmstp_send_status_text(dlmstp_send_status_last()),
+            dlmstp_send_path_last_text());
+    }
+
+    if (adx_request && rp_decoded) {
+        ESP_LOGI(
+            "adx_diag",
+            "invoke=%u service=%u obj=%u:%lu property=%lu array=%lu result=%s apdu_len=%d tx_ret=%d",
+            (unsigned)service_data->invoke_id,
+            (unsigned)SERVICE_CONFIRMED_READ_PROPERTY,
+            (unsigned)rpdata.object_type,
+            (unsigned long)rpdata.object_instance,
+            (unsigned long)rpdata.object_property,
+            (unsigned long)rpdata.array_index,
+            rp_result,
+            apdu_len,
+            bytes_sent);
+    }
 
 #if RP_TX_PATH_DEBUG
     if (object_list_debug_target(&rpdata)) {
