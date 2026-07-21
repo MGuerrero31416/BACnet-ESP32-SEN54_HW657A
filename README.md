@@ -172,8 +172,8 @@ The default BACnet mapping can be modified by editing `sen54_task()` in [main/ma
 | MAX485 Pin | ESP32 GPIO |
 |------------|-----------:|
 | DE/RE | GPIO5 |
-| DI (TX) | GPIO16 |
-| RO (RX) | GPIO17 |
+| DI (TX) | GPIOxx |
+| RO (RX) | GPIOxx |
 
 > **Note**
 >

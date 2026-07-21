@@ -744,15 +744,6 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
                             (USER_MSTP_DEBUG_FORCE_NEXT_STATION <= mstp_port->Nmax_master) &&
                             (USER_MSTP_DEBUG_FORCE_NEXT_STATION != mstp_port->This_Station)) {
                             mstp_port->Next_Station = USER_MSTP_DEBUG_FORCE_NEXT_STATION;
-                        } else if ((mstp_port->Next_Station == mstp_port->This_Station) &&
-                            (mstp_port->SourceAddress != mstp_port->This_Station) &&
-                            (mstp_port->SourceAddress <= mstp_port->Nmax_master)) {
-                            /*
-                               If we were invited into the ring and don't yet
-                               know a successor, seed successor from token source
-                               so token pass can proceed on first ownership.
-                             */
-                            mstp_port->Next_Station = mstp_port->SourceAddress;
                         }
                         mstp_port->ReceivedValidFrame = false;
                         mstp_port->FrameCount = 0;
@@ -960,9 +951,6 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
                 if ((forced_station <= mstp_port->Nmax_master) &&
                     (forced_station != mstp_port->This_Station)) {
                     mstp_port->Next_Station = forced_station;
-                } else if ((mstp_port->SourceAddress != mstp_port->This_Station) &&
-                    (mstp_port->SourceAddress <= mstp_port->Nmax_master)) {
-                    mstp_port->Next_Station = mstp_port->SourceAddress;
                 } else {
                     mstp_port->Next_Station = next_this_station;
                 }
@@ -987,31 +975,14 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
             } else if (
                 (mstp_port->SoleMaster == false) &&
                 (mstp_port->Next_Station == mstp_port->This_Station)) {
-                /*
-                   NextStationUnknown.
-                   Always pass token after use. For MAC17 testing, prefer MAC32
-                   as successor when unknown.
-                 */
-                uint8_t fallback_next_station = mstp_port->This_Station;
-
-                if ((mstp_port->This_Station == 17U) &&
-                    (32U <= mstp_port->Nmax_master)) {
-                    fallback_next_station = 32U;
-                } else if ((mstp_port->SourceAddress != mstp_port->This_Station) &&
-                    (mstp_port->SourceAddress <= mstp_port->Nmax_master)) {
-                    fallback_next_station = mstp_port->SourceAddress;
-                } else {
-                    fallback_next_station = next_this_station;
-                }
-
-                mstp_port->Next_Station = fallback_next_station;
-                mstp_port->TokenCount++;
+                /* NextStationUnknown */
+                mstp_port->Poll_Station = next_this_station;
                 MSTP_Create_And_Send_Frame(
-                    mstp_port, FRAME_TYPE_TOKEN, mstp_port->Next_Station,
-                    mstp_port->This_Station, NULL, 0);
+                    mstp_port, FRAME_TYPE_POLL_FOR_MASTER,
+                    mstp_port->Poll_Station, mstp_port->This_Station, NULL,
+                    0);
                 mstp_port->RetryCount = 0;
-                mstp_port->EventCount = 0;
-                mstp_port->master_state = MSTP_MASTER_STATE_PASS_TOKEN;
+                mstp_port->master_state = MSTP_MASTER_STATE_POLL_FOR_MASTER;
             } else if (mstp_port->TokenCount < (Npoll - 1)) {
                 /* Npoll changed in Errata SSPC-135-2004 */
                 if ((mstp_port->SoleMaster == true) &&
