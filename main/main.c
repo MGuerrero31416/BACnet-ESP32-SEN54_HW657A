@@ -21,6 +21,7 @@
 #include "binary_output.h"
 #include "sen54.h"
 #include "mstp_rs485.h"
+#include "../components/bacnet-stack/src/bacnet/datalink/mstp_debug_tuning.h"
 #include "User_Settings.h"
 
 /* bacnet-stack headers */
@@ -58,7 +59,9 @@
 #include "bacnet/bacenum.h"
 
 static const char *TAG = "bacnet";
+#if USER_MSTP_ACTIVE_DEBUG_ONLY
 static const char *MSTP_ACTIVE_TAG = "mstp_active";
+#endif
 
 /* Temporary discovery tracing gate.
  * Keep off in normal operation so serial logs stay focused.
@@ -1092,6 +1095,8 @@ static void bacnet_datalink_unlock(void)
 
 static bool bacnet_mstp_init(void)
 {
+    uint8_t configured_max_master = USER_MSTP_MAX_MASTER;
+
     MSTP_RS485_Init();
 
     memset(&mstp_port, 0, sizeof(mstp_port));
@@ -1107,7 +1112,10 @@ static bool bacnet_mstp_init(void)
     dlmstp_set_interface((const char *)&mstp_port);
     dlmstp_set_mac_address(USER_MSTP_MAC_ADDRESS);
     dlmstp_set_max_info_frames(USER_MSTP_MAX_INFO_FRAMES);
-    dlmstp_set_max_master(USER_MSTP_MAX_MASTER);
+    if (configured_max_master > 127U) {
+        configured_max_master = 127U;
+    }
+    dlmstp_set_max_master(configured_max_master);
     dlmstp_set_baud_rate(USER_MSTP_BAUD_RATE);
     dlmstp_check_auto_baud_set(USER_MSTP_AUTO_BAUD);
     dlmstp_slave_mode_enabled_set(false);
@@ -1117,7 +1125,7 @@ static bool bacnet_mstp_init(void)
         "MS/TP startup profile: mac=%u baud=%lu max_master=%u max_info=%u tx_buf=%u rx_buf=%u apdu_buf=%u max_apdu=%u",
         (unsigned)USER_MSTP_MAC_ADDRESS,
         (unsigned long)USER_MSTP_BAUD_RATE,
-        (unsigned)USER_MSTP_MAX_MASTER,
+        (unsigned)configured_max_master,
         (unsigned)dlmstp_max_info_frames(),
         (unsigned)sizeof(mstp_tx_buffer),
         (unsigned)sizeof(mstp_rx_buffer),
@@ -1463,6 +1471,7 @@ void app_main(void)
     uint32_t mstp_rx_tick = 0;
     uint32_t mstp_last_seen_pdu = 0;
     uint8_t mstp_alive_ticks = 0;
+    bool mstp_ring_join_logged = false;
     while (1) {
         if (s_bacnet_ip_active) {
             bacnet_datalink_lock(datalink_bip);
@@ -1563,6 +1572,17 @@ void app_main(void)
                 (unsigned long)mstp_diag.bad_crc_counter,
                 (unsigned long)mstp_diag.invalid_counter,
                 (unsigned long)mstp_diag.lost_token_counter);
+            if (!mstp_ring_join_logged &&
+                (mstp_diag.token_received_counter > 0U) &&
+                (mstp_diag.token_passed_counter > 0U)) {
+                ESP_LOGI(
+                    TAG,
+                    "MS/TP ring join complete: token_rx=%lu token_passed=%lu max_master=%u",
+                    (unsigned long)mstp_diag.token_received_counter,
+                    (unsigned long)mstp_diag.token_passed_counter,
+                    (unsigned)dlmstp_max_master());
+                mstp_ring_join_logged = true;
+            }
             if ((mstp_diag.token_received_counter > 0U) &&
                 (mstp_diag.token_passed_counter == 0U)) {
                 ESP_LOGW(

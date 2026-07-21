@@ -33,6 +33,7 @@
 #include "bacnet/datalink/mstptext.h"
 #include "bacnet/npdu.h"
 #include "bacnet/basic/sys/debug.h"
+#include "mstp_debug_tuning.h"
 
 #ifndef USER_MSTP_TOKEN_PASS_ONLY_DEBUG
 #define USER_MSTP_TOKEN_PASS_ONLY_DEBUG 0
@@ -40,6 +41,10 @@
 
 #ifndef USER_MSTP_DEBUG_FORCE_NEXT_STATION
 #define USER_MSTP_DEBUG_FORCE_NEXT_STATION 255
+#endif
+
+#ifndef USER_MSTP_ZERO_CONFIG_ENABLED
+#define USER_MSTP_ZERO_CONFIG_ENABLED 1
 #endif
 
 #if PRINT_ENABLED
@@ -653,7 +658,7 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
     next_next_station =
         (mstp_port->Next_Station + 1) % (mstp_port->Nmax_master + 1);
     /* The zero config checks before running FSM */
-    if ((mstp_port->ZeroConfigEnabled) &&
+    if (USER_MSTP_ZERO_CONFIG_ENABLED && (mstp_port->ZeroConfigEnabled) &&
         (mstp_port->master_state != MSTP_MASTER_STATE_INITIALIZE) &&
         (mstp_port->ReceivedValidFrame == true) &&
         (mstp_port->SourceAddress == mstp_port->This_Station)) {
@@ -668,7 +673,7 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
         case MSTP_MASTER_STATE_INITIALIZE:
             if (mstp_port->CheckAutoBaud) {
                 MSTP_Auto_Baud_FSM(mstp_port);
-            } else if (mstp_port->ZeroConfigEnabled) {
+            } else if (USER_MSTP_ZERO_CONFIG_ENABLED && mstp_port->ZeroConfigEnabled) {
                 MSTP_Zero_Config_FSM(mstp_port);
                 if (mstp_port->This_Station != 255) {
                     /* indicate that the next station is unknown */
@@ -729,6 +734,10 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
                         /* tokens cannot be broadcast */
                         if (mstp_port->DestinationAddress ==
                             MSTP_BROADCAST_ADDRESS) {
+                            break;
+                        }
+                        if (mstp_port->DestinationAddress !=
+                            mstp_port->This_Station) {
                             break;
                         }
                         if ((mstp_port->Next_Station == mstp_port->This_Station) &&
@@ -1265,7 +1274,12 @@ bool MSTP_Master_Node_FSM(struct mstp_port_struct_t *mstp_port)
             /* FIXME: MSTP_Get_Reply waits for a matching reply, but
                if the next queued message doesn't match, then we
                sit here for Treply_delay doing nothing */
+#if USER_MSTP_TOKEN_PASS_ONLY_DEBUG
+            /* Keep token-pass-only debug mode control-frame-only. */
+            length = 0;
+#else
             length = (unsigned)MSTP_Get_Reply(mstp_port, 0);
+#endif
             if (length > 0) {
                 /* Reply */
                 /* If a reply is available from the higher layers  */
@@ -1738,6 +1752,9 @@ static void MSTP_Zero_Config_State_Confirm(struct mstp_port_struct_t *mstp_port)
 void MSTP_Zero_Config_FSM(struct mstp_port_struct_t *mstp_port)
 {
     if (!mstp_port) {
+        return;
+    }
+    if (!USER_MSTP_ZERO_CONFIG_ENABLED) {
         return;
     }
     if (!mstp_port->ZeroConfigEnabled) {

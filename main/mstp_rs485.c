@@ -1,4 +1,5 @@
 #include "mstp_rs485.h"
+#include "../components/bacnet-stack/src/bacnet/datalink/mstp_debug_tuning.h"
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
@@ -41,6 +42,26 @@
 
 #ifndef USER_MSTP_TOKEN_PASS_PRE_DELAY_US
 #define USER_MSTP_TOKEN_PASS_PRE_DELAY_US 0
+#endif
+
+#ifndef USER_RS485_CONTROL_FRAME_UART_FLUSH_BEFORE_TX
+#define USER_RS485_CONTROL_FRAME_UART_FLUSH_BEFORE_TX 0
+#endif
+
+#ifndef USER_RS485_CONTROL_FRAME_EXTRA_IDLE_US
+#define USER_RS485_CONTROL_FRAME_EXTRA_IDLE_US 0
+#endif
+
+#ifndef USER_RS485_CONTROL_FRAME_DE_PRE_TX_US
+#define USER_RS485_CONTROL_FRAME_DE_PRE_TX_US USER_RS485_DE_PRE_TX_US
+#endif
+
+#ifndef USER_RS485_PFM_TX_MARKER_ENABLE
+#define USER_RS485_PFM_TX_MARKER_ENABLE 0
+#endif
+
+#ifndef USER_RS485_PFM_TX_MARKER_GPIO
+#define USER_RS485_PFM_TX_MARKER_GPIO -1
 #endif
 
 #ifndef BACNET_MSTP_TX_HEX_DEBUG
@@ -86,6 +107,7 @@ static volatile uint64_t mstp_token_rx_timestamp_us = 0;
 static MSTP_RS485_PFM_REPLY_TIMING mstp_last_pfm_reply_timing = { 0 };
 static MSTP_RS485_TOKEN_PASS_TIMING mstp_last_token_pass_timing = { 0 };
 static volatile int mstp_last_uart_result = 0;
+static bool mstp_pfm_tx_marker_initialized = false;
 
 typedef struct {
     bool valid;
@@ -322,16 +344,45 @@ static void mstp_log_frame_debug(const uint8_t *payload, uint16_t payload_len)
 }
 #endif
 
-static void mstp_rs485_set_tx_mode(bool enabled)
+static bool mstp_pfm_tx_marker_enabled(void)
 {
-    int level = 0;
+#if USER_RS485_PFM_TX_MARKER_ENABLE
+    return (USER_RS485_PFM_TX_MARKER_GPIO >= 0) &&
+        (USER_RS485_PFM_TX_MARKER_GPIO != MSTP_UART_DE_PIN) &&
+        (USER_RS485_PFM_TX_MARKER_GPIO != MSTP_UART_TX_PIN) &&
+        (USER_RS485_PFM_TX_MARKER_GPIO != MSTP_UART_RX_PIN);
+#else
+    return false;
+#endif
+}
 
-    if (MSTP_RS485_DE_ACTIVE_HIGH) {
-        level = enabled ? 1 : 0;
-    } else {
-        level = enabled ? 0 : 1;
+static void mstp_pfm_tx_marker_init_if_needed(void)
+{
+    if (mstp_pfm_tx_marker_initialized || !mstp_pfm_tx_marker_enabled()) {
+        return;
     }
-    gpio_set_level(MSTP_UART_DE_PIN, level);
+
+#if USER_RS485_PFM_TX_MARKER_ENABLE && (USER_RS485_PFM_TX_MARKER_GPIO >= 0)
+    gpio_config_t io_conf = { 0 };
+
+    io_conf.pin_bit_mask = (1ULL << USER_RS485_PFM_TX_MARKER_GPIO);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    if (gpio_config(&io_conf) == ESP_OK) {
+        gpio_set_level((gpio_num_t)USER_RS485_PFM_TX_MARKER_GPIO, 0);
+        mstp_pfm_tx_marker_initialized = true;
+    }
+#endif
+}
+
+static void mstp_pfm_tx_marker_set(bool high)
+{
+    if (!mstp_pfm_tx_marker_initialized) {
+        return;
+    }
+    gpio_set_level((gpio_num_t)USER_RS485_PFM_TX_MARKER_GPIO, high ? 1 : 0);
 }
 
 static bool mstp_is_confirmed_response_pdu(uint8_t pdu_type)
@@ -455,19 +506,7 @@ void MSTP_RS485_Init(void)
         .source_clk = UART_SCLK_DEFAULT
     };
 
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << MSTP_UART_DE_PIN),
-        .mode = GPIO_MODE_INPUT_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-
-    esp_err_t err = gpio_config(&io_conf);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure DE pin: %d", err);
-    }
-    mstp_rs485_set_tx_mode(false);
+    esp_err_t err = ESP_OK;
 
     err = uart_param_config(MSTP_UART_PORT, &config);
     if (err != ESP_OK) {
@@ -476,7 +515,7 @@ void MSTP_RS485_Init(void)
 
     err = uart_set_pin(
         MSTP_UART_PORT, MSTP_UART_TX_PIN, MSTP_UART_RX_PIN,
-        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        MSTP_UART_DE_PIN, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART set pin failed: %d", err);
     }
@@ -487,20 +526,21 @@ void MSTP_RS485_Init(void)
         ESP_LOGE(TAG, "UART driver install failed: %d", err);
     }
 
+    err = uart_set_mode(MSTP_UART_PORT, UART_MODE_RS485_HALF_DUPLEX);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "UART RS485 half-duplex mode failed: %d", err);
+    }
+
     mstp_last_activity_us = esp_timer_get_time();
     mstp_uart_initialized = true;
 
-    if (!MSTP_MAC25_MIN_LOG_MODE) {
-        ESP_LOGI(
-            TAG,
-            "MS/TP UART initialized on TX=%d RX=%d DE=%d @%lu baud rs485_phy_enabled=%d de_active_high=%d",
-            (int)MSTP_UART_TX_PIN,
-            (int)MSTP_UART_RX_PIN,
-            (int)MSTP_UART_DE_PIN,
-            (unsigned long)mstp_baud_rate,
-            (int)BOARD_RS485_PHY_ENABLED,
-            (int)MSTP_RS485_DE_ACTIVE_HIGH);
-    }
+    ESP_LOGI(
+        TAG,
+        "MS/TP UART pin map tx_pin=%d rx_pin=%d de_rts_pin=%d baud=%lu rs485_mode=uart_rts_half_duplex",
+        (int)MSTP_UART_TX_PIN,
+        (int)MSTP_UART_RX_PIN,
+        (int)MSTP_UART_DE_PIN,
+        (unsigned long)mstp_baud_rate);
 }
 
 void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
@@ -512,9 +552,6 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     int64_t request_to_final_us = -1;
     int written = 0;
     esp_err_t tx_done = ESP_FAIL;
-    int de_level_after_enable = -1;
-    int de_level_before_disable = -1;
-    int de_level_after_disable = -1;
     TickType_t tx_wait_ticks = 0;
     bool has_mstp_header = false;
     uint8_t frame_type = 0xFF;
@@ -522,12 +559,9 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     bool is_reply_to_pfm = false;
     bool is_token_frame = false;
     bool token_pass_only_timing = false;
-    uint32_t de_post_guard_us = 0;
-    bool de_disabled_after_tx_done = false;
     uint32_t de_pre_delay_us = 0;
     uint32_t token_pass_pre_delay_us = 0;
     uint32_t applied_pre_delay_us = 0;
-    bool use_reply_like_de_pre_path = false;
     int64_t de_enable_time_us = 0;
     int64_t uart_write_time_us = 0;
     int64_t tx_done_time_us = 0;
@@ -542,6 +576,8 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         MSTP_RS485_Init();
     }
 
+    mstp_pfm_tx_marker_init_if_needed();
+
     if (!BOARD_RS485_PHY_ENABLED) {
         ESP_LOGE(TAG, "BOARD_RS485_PHY_ENABLED=0; RS485 TX path disabled for this profile");
         return;
@@ -550,8 +586,9 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     mstp_tx_frame_count++;
 #if MSTP_DEBUG_ENABLE
     if ((payload_len >= 8U) && (payload[0] == 0x55U) && (payload[1] == 0xFFU) &&
-        (payload[2] == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER)) {
-        /* Fast Reply-To-PFM path: no pre-TX logs. */
+        ((payload[2] == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER) ||
+            (payload[2] == FRAME_TYPE_TOKEN))) {
+        /* Fast Reply-To-PFM / Token Pass path: no pre-TX logs. */
     } else {
         mstp_log_frame_debug(payload, payload_len);
     }
@@ -566,7 +603,6 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
             (frame_type == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER);
         is_reply_to_pfm = (frame_type == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER);
         token_pass_only_timing = USER_MSTP_TOKEN_PASS_ONLY_DEBUG && is_token_frame;
-        use_reply_like_de_pre_path = is_reply_to_pfm || token_pass_only_timing;
     }
 
     mstp_decode_tx_info(payload, payload_len, &tx_info);
@@ -589,24 +625,23 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         esp_rom_delay_us((uint32_t)USER_MSTP_PFM_REPLY_PRE_DELAY_US);
     }
 
-    mstp_rs485_set_tx_mode(true);
-    if (use_reply_like_de_pre_path) {
+    if (is_reply_to_pfm) {
+        mstp_pfm_tx_marker_set(true);
+    }
+    if (is_reply_to_pfm || token_pass_only_timing) {
         de_enable_time_us = esp_timer_get_time();
         if (is_reply_to_pfm) {
             pfm_rx_time_us = mstp_pfm_rx_timestamp_us;
+            de_pre_delay_us = (uint32_t)USER_RS485_CONTROL_FRAME_DE_PRE_TX_US;
+        } else {
+            de_pre_delay_us = (uint32_t)USER_RS485_DE_PRE_TX_US;
         }
-    }
-    de_level_after_enable = gpio_get_level(MSTP_UART_DE_PIN);
-    if (use_reply_like_de_pre_path) {
-        de_pre_delay_us = (uint32_t)USER_RS485_DE_PRE_TX_US;
         if (de_pre_delay_us > 0U) {
             esp_rom_delay_us(de_pre_delay_us);
         }
-    } else {
-        vTaskDelay(pdMS_TO_TICKS(MSTP_RS485_DE_PRE_TX_GUARD_MS));
     }
 
-    if (use_reply_like_de_pre_path) {
+    if (is_reply_to_pfm || token_pass_only_timing) {
         uart_write_time_us = esp_timer_get_time();
     }
     if (is_reply_to_pfm && (payload_len >= 8U)) {
@@ -631,25 +666,17 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     if (written >= 0) {
         mstp_last_uart_result = (int)tx_done;
     }
-    if (use_reply_like_de_pre_path) {
+    if (is_reply_to_pfm || token_pass_only_timing) {
         tx_done_time_us = esp_timer_get_time();
     }
-
     if (is_reply_to_pfm) {
-        de_post_guard_us = 0;
-    } else if (is_control_frame && (tx_done == ESP_OK)) {
-        de_post_guard_us = 0;
-    } else {
-        de_post_guard_us = (uint32_t)MSTP_RS485_DE_POST_TX_GUARD_MS * 1000U;
-        vTaskDelay(pdMS_TO_TICKS(MSTP_RS485_DE_POST_TX_GUARD_MS));
+        mstp_pfm_tx_marker_set(false);
     }
-    de_level_before_disable = gpio_get_level(MSTP_UART_DE_PIN);
-    de_disabled_after_tx_done = (tx_done == ESP_OK);
-    mstp_rs485_set_tx_mode(false);
-    de_level_after_disable = gpio_get_level(MSTP_UART_DE_PIN);
 
     if (is_reply_to_pfm) {
         uint64_t delta_us = 0;
+        int de_active_level = MSTP_RS485_DE_ACTIVE_HIGH ? 1 : 0;
+        int de_inactive_level = MSTP_RS485_DE_ACTIVE_HIGH ? 0 : 1;
 
         memset(&mstp_last_pfm_reply_timing, 0, sizeof(mstp_last_pfm_reply_timing));
         mstp_last_pfm_reply_timing.valid = true;
@@ -696,6 +723,9 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
                 mstp_last_pfm_reply_timing.total_pfm_rx_to_tx_done_us = (uint32_t)delta_us;
             }
         }
+
+        (void)de_active_level;
+        (void)de_inactive_level;
     }
 
     if (token_pass_only_timing && has_mstp_header && (payload_len >= 8U)) {
@@ -767,12 +797,10 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         if (!MSTP_MAC25_MIN_LOG_MODE) {
             ESP_LOGI(
                 TAG,
-                "mstp_tx_turnaround frame_type=%u is_control_frame=%s de_pre_us=%lu de_post_guard_us=%lu de_disabled_after_tx_done=%s dst=%u src=%u uart_wait_tx_done=%s",
+                "mstp_tx_turnaround frame_type=%u is_control_frame=%s de_pre_us=%lu dst=%u src=%u uart_wait_tx_done=%s",
                 (unsigned)frame_type,
                 is_control_frame ? "yes" : "no",
                 (unsigned long)de_pre_delay_us,
-                (unsigned long)de_post_guard_us,
-                de_disabled_after_tx_done ? "yes" : "no",
                 (unsigned)payload[3],
                 (unsigned)payload[4],
                 esp_err_to_name(tx_done));
@@ -787,17 +815,14 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         if (!MSTP_MAC25_MIN_LOG_MODE) {
             ESP_LOGI(
                 TAG,
-                "mstp TX frame=%u dst=%u src=%u data_len=%u total_len=%u uart_write_ret=%d uart_wait_tx_done=%s de_en=%d de_pre_dis=%d de_dis=%d",
+                "mstp TX frame=%u dst=%u src=%u data_len=%u total_len=%u uart_write_ret=%d uart_wait_tx_done=%s",
                 (unsigned)tx_info.frame_type,
                 (unsigned)payload[3],
                 (unsigned)payload[4],
                 (unsigned)tx_info.mstp_data_len,
                 (unsigned)payload_len,
                 written,
-                esp_err_to_name(tx_done),
-                de_level_after_enable,
-                de_level_before_disable,
-                de_level_after_disable);
+                esp_err_to_name(tx_done));
         }
     }
 

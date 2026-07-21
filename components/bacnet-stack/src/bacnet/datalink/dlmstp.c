@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 /* BACnet Stack defines - first */
 #include "bacnet/bacdef.h"
 #include "bacnet/bacenum.h"
@@ -25,6 +26,7 @@
 #include "bacnet/npdu.h"
 #include "bacnet/bacaddr.h"
 #include "bacnet/basic/sys/debug.h"
+#include "mstp_debug_tuning.h"
 
 #if defined(ESP_PLATFORM)
 #include "esp_log.h"
@@ -71,9 +73,27 @@ extern bool MSTP_RS485_Token_Pass_Timing_Get_Reset(MSTP_RS485_TOKEN_PASS_TIMING 
 #define USER_MSTP_TOKEN_PASS_ONLY_DEBUG 0
 #endif
 
+#ifndef USER_MSTP_DEBUG_FORCE_NEXT_STATION
+#define USER_MSTP_DEBUG_FORCE_NEXT_STATION 32
+#endif
+
+#ifndef USER_MSTP_ZERO_CONFIG_ENABLED
+#define USER_MSTP_ZERO_CONFIG_ENABLED 1
+#endif
+
 #ifndef DLMSTP_PFM_NO_TOKEN_WINDOW_MS
 #define DLMSTP_PFM_NO_TOKEN_WINDOW_MS 1500U
 #endif
+
+#ifndef DLMSTP_POST_PASS_OBSERVE_WINDOW_MS
+#define DLMSTP_POST_PASS_OBSERVE_WINDOW_MS 2000U
+#endif
+
+#ifndef DLMSTP_POST_PFM_OBSERVE_WINDOW_MS
+#define DLMSTP_POST_PFM_OBSERVE_WINDOW_MS 2000U
+#endif
+
+#define DLMSTP_RAW_LOG_MAX_BYTES 128U
 
 /* the current MSTP port that the datalink is using */
 static struct mstp_port_struct_t *MSTP_Port;
@@ -106,6 +126,15 @@ static bool DLMSTP_PFM_Reply_Experiment_Pending = false;
 static uint8_t DLMSTP_PFM_Reply_Experiment_Src = 0xFF;
 static uint8_t DLMSTP_PFM_Reply_Experiment_Dst = 0xFF;
 static uint32_t DLMSTP_PFM_Reply_Experiment_Rx_To_Tx_Us = 0;
+static bool DLMSTP_Post_Pass_Observe_Active = false;
+static uint64_t DLMSTP_Post_Pass_Observe_Deadline_Ms = 0;
+static uint8_t DLMSTP_Post_Pass_Observe_Dst = 0xFF;
+static bool DLMSTP_Post_Pass_Activity_Seen = false;
+static bool DLMSTP_Post_Pass_Next_16_Logged = false;
+static bool DLMSTP_Post_PFM_Observe_Active = false;
+static uint64_t DLMSTP_Post_PFM_Observe_Deadline_Ms = 0;
+static bool DLMSTP_Post_PFM_Observe_Logged = false;
+static bool DLMSTP_Token_Pass_Armed = false;
 
 #ifndef USER_MSTP_PFM_REPLY_PRE_DELAY_US
 #define USER_MSTP_PFM_REPLY_PRE_DELAY_US 0
@@ -237,6 +266,166 @@ static bool dlmstp_post_pfm_window_active(uint64_t now_ms)
 {
     return (DLMSTP_Post_PFM_Window_Deadline_Ms != 0) &&
         (now_ms <= DLMSTP_Post_PFM_Window_Deadline_Ms);
+}
+
+static void dlmstp_log_raw_frame_bytes(
+    const char *prefix,
+    const uint8_t *buffer,
+    uint16_t nbytes)
+{
+    char bytes_text[3 * 64 + 1];
+    size_t i = 0;
+    size_t limit = 0;
+    size_t used = 0;
+    int written = 0;
+
+    if (!prefix || !buffer || (nbytes == 0U)) {
+        return;
+    }
+
+    limit = (nbytes < 64U) ? (size_t)nbytes : 64U;
+    bytes_text[0] = '\0';
+    for (i = 0; i < limit; i++) {
+        written = snprintf(
+            &bytes_text[used],
+            sizeof(bytes_text) - used,
+            (i == 0U) ? "%02X" : " %02X",
+            (unsigned)buffer[i]);
+        if ((written <= 0) || ((size_t)written >= (sizeof(bytes_text) - used))) {
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    MSTP_ACTIVE_LOGW("%s bytes=%s", prefix, bytes_text);
+}
+
+static void dlmstp_post_pfm_observe_start(void)
+{
+    DLMSTP_Post_PFM_Observe_Active = true;
+    DLMSTP_Post_PFM_Observe_Deadline_Ms =
+        dlmstp_diag_timestamp_ms() + DLMSTP_POST_PFM_OBSERVE_WINDOW_MS;
+    DLMSTP_Post_PFM_Observe_Logged = false;
+}
+
+static void dlmstp_post_pfm_observe_reset(void)
+{
+    DLMSTP_Post_PFM_Observe_Active = false;
+    DLMSTP_Post_PFM_Observe_Deadline_Ms = 0;
+    DLMSTP_Post_PFM_Observe_Logged = false;
+}
+
+static void dlmstp_post_pfm_observe_valid_frame(
+    uint8_t source,
+    uint8_t destination,
+    uint8_t frame_type)
+{
+    if (!DLMSTP_Post_PFM_Observe_Active || DLMSTP_Post_PFM_Observe_Logged) {
+        return;
+    }
+
+    DLMSTP_Post_PFM_Observe_Logged = true;
+    if ((frame_type == FRAME_TYPE_TOKEN) && (source == 16U) && (destination == 17U)) {
+        MSTP_ACTIVE_LOGW("POST_PFM_TOKEN_RX src=16 dst=17");
+    } else {
+        MSTP_ACTIVE_LOGW(
+            "POST_PFM_NEXT_FRAME src=%u dst=%u frame_type=%u",
+            (unsigned)source,
+            (unsigned)destination,
+            (unsigned)frame_type);
+    }
+    dlmstp_post_pfm_observe_reset();
+}
+
+static void dlmstp_post_pfm_observe_check_timeout(void)
+{
+    uint64_t now_ms = dlmstp_diag_timestamp_ms();
+
+    if (!DLMSTP_Post_PFM_Observe_Active) {
+        return;
+    }
+    if (now_ms <= DLMSTP_Post_PFM_Observe_Deadline_Ms) {
+        return;
+    }
+
+    if (!DLMSTP_Post_PFM_Observe_Logged) {
+        MSTP_ACTIVE_LOGW(
+            "POST_PFM_NO_VALID_FRAME after_ms=%u",
+            (unsigned)DLMSTP_POST_PFM_OBSERVE_WINDOW_MS);
+    }
+    dlmstp_post_pfm_observe_reset();
+}
+
+static void dlmstp_post_pass_observe_start(uint8_t destination_mac)
+{
+    DLMSTP_Post_Pass_Observe_Active = true;
+    DLMSTP_Post_Pass_Observe_Deadline_Ms =
+        dlmstp_diag_timestamp_ms() + DLMSTP_POST_PASS_OBSERVE_WINDOW_MS;
+    DLMSTP_Post_Pass_Observe_Dst = destination_mac;
+    DLMSTP_Post_Pass_Activity_Seen = false;
+    DLMSTP_Post_Pass_Next_16_Logged = false;
+}
+
+static void dlmstp_post_pass_observe_reset(void)
+{
+    DLMSTP_Post_Pass_Observe_Active = false;
+    DLMSTP_Post_Pass_Observe_Deadline_Ms = 0;
+    DLMSTP_Post_Pass_Observe_Dst = 0xFF;
+    DLMSTP_Post_Pass_Activity_Seen = false;
+    DLMSTP_Post_Pass_Next_16_Logged = false;
+}
+
+static void dlmstp_post_pass_observe_valid_frame(
+    uint8_t source,
+    uint8_t destination,
+    uint8_t frame_type)
+{
+    if (!DLMSTP_Post_Pass_Observe_Active) {
+        return;
+    }
+
+    if (!DLMSTP_Post_Pass_Activity_Seen &&
+        (source == DLMSTP_Post_Pass_Observe_Dst)) {
+        DLMSTP_Post_Pass_Activity_Seen = true;
+        MSTP_ACTIVE_LOGW(
+            "POST_PASS_ACTIVITY src=%u dst=%u frame_type=%u",
+            (unsigned)source,
+            (unsigned)destination,
+            (unsigned)frame_type);
+    }
+
+    if (!DLMSTP_Post_Pass_Next_16_Logged && (source == 16U) &&
+        (destination == 17U) &&
+        ((frame_type == FRAME_TYPE_POLL_FOR_MASTER) ||
+            (frame_type == FRAME_TYPE_TOKEN))) {
+        DLMSTP_Post_Pass_Next_16_Logged = true;
+        MSTP_ACTIVE_LOGW(
+            "POST_PASS_NEXT_16 src=%u dst=%u frame_type=%u",
+            (unsigned)source,
+            (unsigned)destination,
+            (unsigned)frame_type);
+    }
+}
+
+static void dlmstp_post_pass_observe_check_timeout(void)
+{
+    uint64_t now_ms = dlmstp_diag_timestamp_ms();
+
+    if (!DLMSTP_Post_Pass_Observe_Active) {
+        return;
+    }
+    if (now_ms <= DLMSTP_Post_Pass_Observe_Deadline_Ms) {
+        return;
+    }
+
+    if (!DLMSTP_Post_Pass_Activity_Seen) {
+        MSTP_ACTIVE_LOGW(
+            "POST_PASS_NO_ACTIVITY dst=%u after_ms=%u",
+            (unsigned)DLMSTP_Post_Pass_Observe_Dst,
+            (unsigned)DLMSTP_POST_PASS_OBSERVE_WINDOW_MS);
+    }
+
+    dlmstp_post_pass_observe_reset();
 }
 
 static const char *dlmstp_master_state_text_short(MSTP_MASTER_STATE state);
@@ -969,6 +1158,10 @@ void MSTP_Send_Frame(
     uint8_t fast_reply_dst = 0xFF;
     bool token_pass_frame_pending = false;
     uint8_t token_pass_dst = 0xFF;
+    uint8_t fast_reply_raw[DLMSTP_RAW_LOG_MAX_BYTES] = { 0 };
+    uint16_t fast_reply_raw_len = 0;
+    uint8_t token_pass_raw[DLMSTP_RAW_LOG_MAX_BYTES] = { 0 };
+    uint16_t token_pass_raw_len = 0;
 
     if (buffer && (nbytes >= 8U) && (buffer[0] == 0x55U) && (buffer[1] == 0xFFU)) {
         uint8_t frame_type = buffer[2];
@@ -991,6 +1184,11 @@ void MSTP_Send_Frame(
 
         if ((frame_type == FRAME_TYPE_REPLY_TO_POLL_FOR_MASTER) &&
             (source == mstp_port->This_Station)) {
+            fast_reply_raw_len = (nbytes < DLMSTP_RAW_LOG_MAX_BYTES) ?
+                nbytes : DLMSTP_RAW_LOG_MAX_BYTES;
+            if (fast_reply_raw_len > 0U) {
+                memcpy(fast_reply_raw, buffer, fast_reply_raw_len);
+            }
             DLMSTP_Token_Diagnostics.reply_to_poll_for_master_sent_counter++;
             DLMSTP_Token_Diagnostics.fast_reply_to_pfm_sent_counter++;
             DLMSTP_Post_PFM_Window_Deadline_Ms = now_ms + DLMSTP_PFM_NO_TOKEN_WINDOW_MS;
@@ -1006,8 +1204,22 @@ void MSTP_Send_Frame(
         (void)window_active;
 
         if ((frame_type == FRAME_TYPE_TOKEN) && (source == mstp_port->This_Station)) {
+            if (!DLMSTP_Token_Pass_Armed ||
+                !dlmstp_master_has_token(mstp_port->master_state)) {
+                DLMSTP_DIAG_LOGW(
+                    "token_pass_blocked reason=no_local_token_ownership dst=%u state=%s",
+                    (unsigned)destination,
+                    dlmstp_master_state_text_short(mstp_port->master_state));
+                return;
+            }
+            token_pass_raw_len = (nbytes < DLMSTP_RAW_LOG_MAX_BYTES) ?
+                nbytes : DLMSTP_RAW_LOG_MAX_BYTES;
+            if (token_pass_raw_len > 0U) {
+                memcpy(token_pass_raw, buffer, token_pass_raw_len);
+            }
             DLMSTP_Token_Diagnostics.token_passed_counter++;
             DLMSTP_Token_Cycle_Passed = true;
+            DLMSTP_Token_Pass_Armed = false;
             DLMSTP_Token_Pass_Deadline_Ms = 0;
             token_pass_frame_pending = true;
             token_pass_dst = destination;
@@ -1060,6 +1272,13 @@ void MSTP_Send_Frame(
                 (unsigned)token_timing.total_us,
                 token_timing.tx_done_ok ? "sent" : "fail");
         }
+        if (token_pass_raw_len > 0U) {
+            dlmstp_log_raw_frame_bytes("TOKEN_PASS_RAW", token_pass_raw, token_pass_raw_len);
+        }
+
+        if (token_pass_dst == USER_MSTP_DEBUG_FORCE_NEXT_STATION) {
+            dlmstp_post_pass_observe_start(token_pass_dst);
+        }
     }
 
     if (fast_reply_to_pfm_frame) {
@@ -1101,6 +1320,9 @@ void MSTP_Send_Frame(
                 (unsigned)USER_MSTP_PFM_REPLY_PRE_DELAY_US,
                 (unsigned)USER_RS485_DE_PRE_TX_US);
         }
+        (void)fast_reply_raw_len;
+
+        dlmstp_post_pfm_observe_start();
     }
 
     user->Statistics.transmit_frame_counter++;
@@ -1159,6 +1381,8 @@ uint16_t dlmstp_receive(
     }
     dlmstp_token_pass_check_timeout();
     dlmstp_post_pfm_window_check_timeout();
+    dlmstp_post_pfm_observe_check_timeout();
+    dlmstp_post_pass_observe_check_timeout();
     while (!MSTP_Port->InputBuffer) {
         /* FIXME: develop configure an input buffer! */
     }
@@ -1196,6 +1420,14 @@ uint16_t dlmstp_receive(
     }
     if (MSTP_Port->ReceivedValidFrame) {
         user->Statistics.receive_valid_frame_counter++;
+        dlmstp_post_pfm_observe_valid_frame(
+            MSTP_Port->SourceAddress,
+            MSTP_Port->DestinationAddress,
+            MSTP_Port->FrameType);
+        dlmstp_post_pass_observe_valid_frame(
+            MSTP_Port->SourceAddress,
+            MSTP_Port->DestinationAddress,
+            MSTP_Port->FrameType);
         dlmstp_post_pfm_log_frame_event(MSTP_Port, "valid_for_us", true, true);
         if (MSTP_Port->FrameType == FRAME_TYPE_POLL_FOR_MASTER) {
             user->Statistics.poll_for_master_counter++;
@@ -1215,6 +1447,7 @@ uint16_t dlmstp_receive(
         } else if ((MSTP_Port->FrameType == FRAME_TYPE_TOKEN) &&
             (MSTP_Port->DestinationAddress == MSTP_Port->This_Station)) {
             DLMSTP_Token_Diagnostics.token_received_counter++;
+            DLMSTP_Token_Pass_Armed = true;
             MSTP_ACTIVE_LOGW(
                 "TOKEN_RX src=%u dst=%u",
                 (unsigned)MSTP_Port->SourceAddress,
@@ -1269,6 +1502,14 @@ uint16_t dlmstp_receive(
     }
     if (MSTP_Port->ReceivedValidFrameNotForUs) {
         user->Statistics.receive_valid_frame_not_for_us_counter++;
+        dlmstp_post_pfm_observe_valid_frame(
+            MSTP_Port->SourceAddress,
+            MSTP_Port->DestinationAddress,
+            MSTP_Port->FrameType);
+        dlmstp_post_pass_observe_valid_frame(
+            MSTP_Port->SourceAddress,
+            MSTP_Port->DestinationAddress,
+            MSTP_Port->FrameType);
         if (MSTP_Port->FrameType == FRAME_TYPE_TOKEN) {
             uint8_t candidate = 0xFF;
 
@@ -1656,7 +1897,12 @@ bool dlmstp_zero_config_enabled_set(bool flag)
     if (!MSTP_Port) {
         return false;
     }
+#if !USER_MSTP_ZERO_CONFIG_ENABLED
+    (void)flag;
+    MSTP_Port->ZeroConfigEnabled = false;
+#else
     MSTP_Port->ZeroConfigEnabled = flag;
+#endif
 
     return true;
 }
@@ -2165,6 +2411,9 @@ bool dlmstp_init(char *ifname)
                 sizeof(user->PDU_Buffer), sizeof(struct dlmstp_packet),
                 DLMSTP_MAX_INFO_FRAMES);
             MSTP_Init(MSTP_Port);
+#if !USER_MSTP_ZERO_CONFIG_ENABLED
+            MSTP_Port->ZeroConfigEnabled = false;
+#endif
             user->Initialized = true;
         }
         status = true;
