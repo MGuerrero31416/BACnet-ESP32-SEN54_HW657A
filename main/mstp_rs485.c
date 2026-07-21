@@ -356,6 +356,18 @@ static bool mstp_pfm_tx_marker_enabled(void)
 #endif
 }
 
+static void mstp_rs485_set_tx_mode(bool enabled)
+{
+    int level = 0;
+
+    if (MSTP_RS485_DE_ACTIVE_HIGH) {
+        level = enabled ? 1 : 0;
+    } else {
+        level = enabled ? 0 : 1;
+    }
+    gpio_set_level(MSTP_UART_DE_PIN, level);
+}
+
 static void mstp_pfm_tx_marker_init_if_needed(void)
 {
     if (mstp_pfm_tx_marker_initialized || !mstp_pfm_tx_marker_enabled()) {
@@ -506,7 +518,21 @@ void MSTP_RS485_Init(void)
         .source_clk = UART_SCLK_DEFAULT
     };
 
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << MSTP_UART_DE_PIN),
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+
     esp_err_t err = ESP_OK;
+
+    err = gpio_config(&io_conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure DE pin: %d", err);
+    }
+    mstp_rs485_set_tx_mode(false);
 
     err = uart_param_config(MSTP_UART_PORT, &config);
     if (err != ESP_OK) {
@@ -515,7 +541,7 @@ void MSTP_RS485_Init(void)
 
     err = uart_set_pin(
         MSTP_UART_PORT, MSTP_UART_TX_PIN, MSTP_UART_RX_PIN,
-        MSTP_UART_DE_PIN, UART_PIN_NO_CHANGE);
+        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART set pin failed: %d", err);
     }
@@ -526,9 +552,9 @@ void MSTP_RS485_Init(void)
         ESP_LOGE(TAG, "UART driver install failed: %d", err);
     }
 
-    err = uart_set_mode(MSTP_UART_PORT, UART_MODE_RS485_HALF_DUPLEX);
+    err = uart_set_mode(MSTP_UART_PORT, UART_MODE_UART);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "UART RS485 half-duplex mode failed: %d", err);
+        ESP_LOGE(TAG, "UART mode set failed: %d", err);
     }
 
     mstp_last_activity_us = esp_timer_get_time();
@@ -536,7 +562,7 @@ void MSTP_RS485_Init(void)
 
     ESP_LOGI(
         TAG,
-        "MS/TP UART pin map tx_pin=%d rx_pin=%d de_rts_pin=%d baud=%lu rs485_mode=uart_rts_half_duplex",
+        "MS/TP UART pin map tx_pin=%d rx_pin=%d de_pin=%d baud=%lu rs485_mode=manual_gpio",
         (int)MSTP_UART_TX_PIN,
         (int)MSTP_UART_RX_PIN,
         (int)MSTP_UART_DE_PIN,
@@ -628,6 +654,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     if (is_reply_to_pfm) {
         mstp_pfm_tx_marker_set(true);
     }
+    mstp_rs485_set_tx_mode(true);
     if (is_reply_to_pfm || token_pass_only_timing) {
         de_enable_time_us = esp_timer_get_time();
         if (is_reply_to_pfm) {
@@ -666,6 +693,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
     if (written >= 0) {
         mstp_last_uart_result = (int)tx_done;
     }
+    mstp_rs485_set_tx_mode(false);
     if (is_reply_to_pfm || token_pass_only_timing) {
         tx_done_time_us = esp_timer_get_time();
     }
