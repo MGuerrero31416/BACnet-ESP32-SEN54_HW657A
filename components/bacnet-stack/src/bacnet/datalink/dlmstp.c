@@ -157,11 +157,11 @@ static bool DLMSTP_Token_Pass_Armed = false;
 #if USER_MSTP_ACTIVE_DEBUG_ONLY
 #define DLMSTP_DIAG_LOGI(...) do { } while (0)
 #define DLMSTP_DIAG_LOGW(...) do { } while (0)
-#define MSTP_ACTIVE_LOGW(...) ESP_LOGW("mstp_active", __VA_ARGS__)
-#define MSTP_ACTIVE_LOGD(...) ESP_LOGD("mstp_active", __VA_ARGS__)
+#define MSTP_ACTIVE_LOGW(...) do { } while (0)
+#define MSTP_ACTIVE_LOGD(...) do { } while (0)
 #else
-#define DLMSTP_DIAG_LOGI(...) ESP_LOGD("dlmstp_diag", __VA_ARGS__)
-#define DLMSTP_DIAG_LOGW(...) ESP_LOGD("dlmstp_diag", __VA_ARGS__)
+#define DLMSTP_DIAG_LOGI(...) do { } while (0)
+#define DLMSTP_DIAG_LOGW(...) do { } while (0)
 #define MSTP_ACTIVE_LOGW(...) do { } while (0)
 #define MSTP_ACTIVE_LOGD(...) do { } while (0)
 #endif
@@ -731,9 +731,7 @@ int dlmstp_send_pdu(
     can_transmit_now = dlmstp_master_can_transmit(master_state);
     priority_next_send = DLMSTP_Priority_Next_Send;
     DLMSTP_Priority_Next_Send = false;
-#if USER_MSTP_ACTIVE_DEBUG_ONLY
     (void)token_owned;
-#endif
 
     if (!can_transmit_now) {
         DLMSTP_Token_Diagnostics.app_frames_blocked_no_token_counter++;
@@ -806,9 +804,11 @@ int dlmstp_send_pdu(
     }
 
     pkt = (struct dlmstp_packet *)(void *)Ringbuf_Data_Peek(&user->PDU_Queue);
-    debug_printf(
-        "dlmstp send_path=queued frame=%u dst=%u pdu_len=%u master_state=%s\n",
-        (unsigned)frame_type, (unsigned)destination_mac, (unsigned)pdu_len,
+    DLMSTP_DIAG_LOGI(
+        "dlmstp send_path=queued frame=%u dst=%u pdu_len=%u master_state=%s",
+        (unsigned)frame_type,
+        (unsigned)destination_mac,
+        (unsigned)pdu_len,
         dlmstp_master_state_text_short(master_state));
     if (pkt) {
         pkt->frame_type = frame_type;
@@ -1629,9 +1629,7 @@ uint16_t dlmstp_receive(
                             DLMSTP_Token_Cycle_App_Frames_Sent);
 #endif
                         if (!DLMSTP_MAC25_MIN_LOG_MODE) {
-#if defined(ESP_PLATFORM)
-                            ESP_LOGW(
-                                "dlmstp_diag",
+                            DLMSTP_DIAG_LOGW(
                                 "TOKEN USE ENDED WITHOUT PASSING TOKEN src=%u dst=%u next_station=%u poll_station=%u mstp_state=%s queue_depth=%u",
                                 (unsigned)DLMSTP_Token_Cycle_Source,
                                 (unsigned)DLMSTP_Token_Cycle_Destination,
@@ -1639,16 +1637,6 @@ uint16_t dlmstp_receive(
                                 (unsigned)MSTP_Port->Poll_Station,
                                 dlmstp_master_state_text_short(new_state),
                                 dlmstp_send_pdu_queue_depth());
-#else
-                            debug_printf(
-                                "TOKEN USE ENDED WITHOUT PASSING TOKEN src=%u dst=%u next_station=%u poll_station=%u mstp_state=%s queue_depth=%u",
-                                (unsigned)DLMSTP_Token_Cycle_Source,
-                                (unsigned)DLMSTP_Token_Cycle_Destination,
-                                (unsigned)MSTP_Port->Next_Station,
-                                (unsigned)MSTP_Port->Poll_Station,
-                                dlmstp_master_state_text_short(new_state),
-                                dlmstp_send_pdu_queue_depth());
-#endif
                         }
                         DLMSTP_Token_Cycle_Active = false;
                             DLMSTP_Token_Pass_Deadline_Ms = 0;

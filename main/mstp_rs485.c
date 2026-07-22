@@ -93,6 +93,7 @@
 _Static_assert(MSTP_UART_DE_PIN == GPIO_NUM_5, "Expected DE pin GPIO5");
 
 static const char *TAG = "mstp_rs485";
+#define MSTP_RS485_DIAG_LOGD(...) do { } while (0)
 static bool mstp_uart_initialized = false;
 static volatile bool mstp_tx_in_progress = false;
 static uint32_t mstp_baud_rate = MSTP_UART_BAUD_DEFAULT;
@@ -300,26 +301,26 @@ static void mstp_log_frame_debug(const uint8_t *payload, uint16_t payload_len)
         if (ftype == 0x00) { /* TOKEN */
             mstp_tx_token_count++;
             if ((now_us - mstp_tx_token_log_us) >= 5000000LL) {
-                ESP_LOGD(TAG, "TX TOKEN dst=%u src=%u count=%lu", fdest, fsrc,
+                MSTP_RS485_DIAG_LOGD(TAG, "TX TOKEN dst=%u src=%u count=%lu", fdest, fsrc,
                     (unsigned long)mstp_tx_token_count);
                 mstp_tx_token_log_us = now_us;
             }
         } else if (ftype == 0x01) { /* POLL_FOR_MASTER */
             mstp_tx_pfm_count++;
             if ((now_us - mstp_tx_pfm_log_us) >= 5000000LL) {
-                ESP_LOGD(TAG, "TX POLL_FOR_MASTER dst=%u src=%u count=%lu", fdest,
+                MSTP_RS485_DIAG_LOGD(TAG, "TX POLL_FOR_MASTER dst=%u src=%u count=%lu", fdest,
                     fsrc, (unsigned long)mstp_tx_pfm_count);
                 mstp_tx_pfm_log_us = now_us;
             }
         } else if (ftype == 0x02) { /* REPLY_TO_POLL_FOR_MASTER */
             mstp_tx_rpfm_count++;
             if ((now_us - mstp_tx_rpfm_log_us) >= 5000000LL) {
-                ESP_LOGD(TAG, "TX REPLY_TO_PFM dst=%u src=%u count=%lu", fdest,
+                MSTP_RS485_DIAG_LOGD(TAG, "TX REPLY_TO_PFM dst=%u src=%u count=%lu", fdest,
                     fsrc, (unsigned long)mstp_tx_rpfm_count);
                 mstp_tx_rpfm_log_us = now_us;
             }
         } else {
-            ESP_LOGD(TAG, "TX frm#%lu type=0x%02X dst=%u src=%u dlen=%u plen=%u",
+            MSTP_RS485_DIAG_LOGD(TAG, "TX frm#%lu type=0x%02X dst=%u src=%u dlen=%u plen=%u",
                 (unsigned long)mstp_tx_frame_count, ftype, fdest, fsrc, flen,
                 payload_len);
             uint16_t dump_len = payload_len < 16u ? payload_len : 16u;
@@ -328,10 +329,10 @@ static void mstp_log_frame_debug(const uint8_t *payload, uint16_t payload_len)
                 sprintf(&hex_buf[i * 3], "%02X ", payload[i]);
             }
             hex_buf[dump_len * 3 > 0 ? dump_len * 3 - 1 : 0] = '\0';
-            ESP_LOGD(TAG, "TX hex[%u]: %s", dump_len, hex_buf);
+            MSTP_RS485_DIAG_LOGD(TAG, "TX hex[%u]: %s", dump_len, hex_buf);
         }
     } else {
-        ESP_LOGD(TAG, "TX frm#%lu plen=%u (no preamble)",
+        MSTP_RS485_DIAG_LOGD(TAG, "TX frm#%lu plen=%u (no preamble)",
             (unsigned long)mstp_tx_frame_count, payload_len);
         uint16_t dump_len = payload_len < 16u ? payload_len : 16u;
         char hex_buf[49];
@@ -339,7 +340,7 @@ static void mstp_log_frame_debug(const uint8_t *payload, uint16_t payload_len)
             sprintf(&hex_buf[i * 3], "%02X ", payload[i]);
         }
         hex_buf[dump_len * 3 > 0 ? dump_len * 3 - 1 : 0] = '\0';
-        ESP_LOGD(TAG, "TX hex[%u]: %s", dump_len, hex_buf);
+        MSTP_RS485_DIAG_LOGD(TAG, "TX hex[%u]: %s", dump_len, hex_buf);
     }
 }
 #endif
@@ -496,7 +497,7 @@ static void mstp_log_hex_frame_full(const uint8_t *payload, uint16_t payload_len
             hex_buf[(chunk_len * 3) - 1] = '\0';
         }
 
-        ESP_LOGD(TAG, "mstp tx6 hex[%u..%u]=%s", (unsigned)offset,
+        MSTP_RS485_DIAG_LOGD(TAG, "mstp tx6 hex[%u..%u]=%s", (unsigned)offset,
             (unsigned)(offset + chunk_len - 1), hex_buf);
         offset = (uint16_t)(offset + chunk_len);
     }
@@ -560,7 +561,7 @@ void MSTP_RS485_Init(void)
     mstp_last_activity_us = esp_timer_get_time();
     mstp_uart_initialized = true;
 
-    ESP_LOGD(
+    MSTP_RS485_DIAG_LOGD(
         TAG,
         "MS/TP UART pin map tx_pin=%d rx_pin=%d de_pin=%d baud=%lu rs485_mode=manual_gpio",
         (int)MSTP_UART_TX_PIN,
@@ -834,7 +835,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
 
     if (has_mstp_header) {
         if (!MSTP_MAC25_MIN_LOG_MODE) {
-            ESP_LOGD(
+            MSTP_RS485_DIAG_LOGD(
                 TAG,
                 "mstp_tx_turnaround frame_type=%u is_control_frame=%s de_pre_us=%lu dst=%u src=%u uart_wait_tx_done=%s",
                 (unsigned)frame_type,
@@ -852,7 +853,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         tx_info.is_data_frame &&
         (tx_info.frame_type == FRAME_TYPE_BACNET_DATA_NOT_EXPECTING_REPLY)) {
         if (!MSTP_MAC25_MIN_LOG_MODE) {
-            ESP_LOGD(
+            MSTP_RS485_DIAG_LOGD(
                 TAG,
                 "mstp TX frame=%u dst=%u src=%u data_len=%u total_len=%u uart_write_ret=%d uart_wait_tx_done=%s",
                 (unsigned)tx_info.frame_type,
@@ -896,7 +897,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
                 prop_log = (long)request_meta->object_property;
             }
 
-            ESP_LOGD(
+            MSTP_RS485_DIAG_LOGD(
                 TAG,
                 "mstp tx6 dbg dst=%u src=%u data_len=%u total_len=%u invoke=%d service=%d obj=%d:%ld prop=%ld apdu_len=%d",
                 (unsigned)payload[3],
@@ -928,7 +929,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
             }
 
             if (!MSTP_MAC25_MIN_LOG_MODE) {
-                ESP_LOGD(
+                MSTP_RS485_DIAG_LOGD(
                     TAG,
                     "final response sent invoke=%u requester_mac=%u service=%u object=%u:%lu property=%lu array=%lu reply_postponed=%s req_to_postponed_ms=%ld req_to_final_ms=%ld pdu=0x%02X tx_ret=%d tx_done=%d",
                     (unsigned)request_meta->invoke_id,
@@ -949,6 +950,10 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
             memset(request_meta, 0, sizeof(*request_meta));
         }
     }
+
+    (void)is_control_frame;
+    (void)request_to_postponed_us;
+    (void)request_to_final_us;
 
     mstp_tx_in_progress = false;
     mstp_last_activity_us = esp_timer_get_time();

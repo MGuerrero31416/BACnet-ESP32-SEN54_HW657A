@@ -82,8 +82,8 @@ static const char *MSTP_ACTIVE_TAG = "mstp_active";
 #define BACNET_SEN54_LOGI(...) do { } while (0)
 #define BACNET_SEN54_LOGW(...) do { } while (0)
 #else
-#define BACNET_DISCOVERY_LOGI(...) ESP_LOGD(__VA_ARGS__)
-#define BACNET_DISCOVERY_LOGW(...) ESP_LOGD(__VA_ARGS__)
+#define BACNET_DISCOVERY_LOGI(...) do { } while (0)
+#define BACNET_DISCOVERY_LOGW(...) do { } while (0)
 #define BACNET_SEN54_LOGI(...) ESP_LOGI(__VA_ARGS__)
 #define BACNET_SEN54_LOGW(...) ESP_LOGW(__VA_ARGS__)
 #endif
@@ -337,6 +337,9 @@ static void bacnet_log_i_am_mstp_failure(const char *reason, int bytes_sent)
     bool has_oldest = false;
 
     has_oldest = dlmstp_send_pdu_queue_oldest_source(&oldest_source, &oldest_age_ms);
+    (void)oldest_source;
+    (void)oldest_age_ms;
+    (void)has_oldest;
     BACNET_DISCOVERY_LOGW(
         TAG,
         "I-Am TX fail reason=%s datalink_send=%d queue_depth=%u oldest_src=%s oldest_age_ms=%lu master_state=%s token=%s can_tx=%s status=%s",
@@ -566,26 +569,21 @@ static int bacnet_send_i_am_with_reason(
         }
     }
 
+    (void)device_instance;
+    (void)max_apdu;
+    (void)segmentation;
+    (void)vendor_id;
+    (void)dst_mac;
+    (void)dst_scope;
+    (void)mstp_state;
+    (void)queue_depth;
+
     return bytes_sent;
 }
 
 #if !USER_MSTP_ACTIVE_DEBUG_ONLY
 static void bacnet_discovery_summary_log_and_reset(void)
 {
-    ESP_LOGD(
-        TAG,
-        "discovery summary: discovered=%s retry_attempts=%lu unicast_i_am_sent=%lu broadcast_i_am_sent=%lu confirmed_requests_seen=%lu queue_depth=%u compat_i_am_sent=%lu global_whois=%lu limited_1_1=%lu remote_i_am=%lu",
-        s_bacrouter_discovery_succeeded ? "yes" : "no",
-        (unsigned long)s_bacrouter_retry_attempt_count,
-        (unsigned long)s_discovery_unicast_i_am_sent,
-        (unsigned long)s_discovery_broadcast_i_am_sent,
-        (unsigned long)s_discovery_confirmed_requests_seen,
-        dlmstp_send_pdu_queue_depth(),
-        (unsigned long)s_discovery_compat_i_am_sent,
-        (unsigned long)s_discovery_global_whois_seen,
-        (unsigned long)s_discovery_limited_1_1_seen,
-        (unsigned long)s_discovery_remote_iam_seen);
-
     s_discovery_global_whois_seen = 0;
     s_discovery_limited_1_1_seen = 0;
     s_discovery_compat_throttled = 0;
@@ -646,6 +644,9 @@ static void bacnet_mstp_discovery_retry_tick(void)
         unicast_result,
         broadcast_result,
         s_bacrouter_discovery_succeeded ? "yes" : "no");
+
+    (void)unicast_result;
+    (void)broadcast_result;
 }
 
 static void bacnet_on_bacrouter_discovery_succeeded(void)
@@ -673,6 +674,9 @@ static void bacnet_on_bacrouter_discovery_succeeded(void)
         "discovery cleanup: purged stale I-Am, queue_depth_now=%u dropped_i_am=%s",
         queue_depth_now,
         dropped_i_am ? "yes" : "no");
+
+    (void)dropped_i_am;
+    (void)queue_depth_now;
 }
 
 static void bacnet_mstp_discovery_pending_broadcast_tick(void)
@@ -725,6 +729,8 @@ static void bacnet_mstp_discovery_pending_broadcast_tick(void)
         s_bacrouter_retry_pair_attempt_pending = 0;
         s_bacrouter_retry_pair_unicast_result_pending = 0;
     }
+
+    (void)broadcast_result;
 }
 
 static void handler_who_is_debug(
@@ -1519,29 +1525,6 @@ void app_main(void)
                     (unsigned long)mstp_stats.receive_invalid_frame_counter,
                     (unsigned long)mstp_stats.lost_token_counter);
             }
-#if MSTP_DEBUG_ENABLE
-            else {
-                ESP_LOGD(
-                    TAG,
-                    "MS/TP 30s stats: rx_bytes=%lu preamble55=%lu preamble55ff=%lu pdu=%lu apdu=%lu rp=%lu wp=%lu valid=%lu invalid=%lu not_for_us=%lu bad_crc=%lu tx_frames=%lu rx_pdu=%lu poll=%lu lost_token=%lu sole_master=%d",
-                    (unsigned long)rx_bytes,
-                    (unsigned long)preamble_55,
-                    (unsigned long)preamble_55ff,
-                    (unsigned long)mstp_pdu_count,
-                    (unsigned long)mstp_apdu_count,
-                    (unsigned long)mstp_rp_total,
-                    (unsigned long)mstp_wp_total,
-                    (unsigned long)mstp_stats.receive_valid_frame_counter,
-                    (unsigned long)mstp_stats.receive_invalid_frame_counter,
-                    (unsigned long)mstp_stats.receive_valid_frame_not_for_us_counter,
-                    (unsigned long)mstp_stats.bad_crc_counter,
-                    (unsigned long)mstp_stats.transmit_frame_counter,
-                    (unsigned long)mstp_stats.receive_pdu_counter,
-                    (unsigned long)mstp_stats.poll_for_master_counter,
-                    (unsigned long)mstp_stats.lost_token_counter,
-                    dlmstp_sole_master() ? 1 : 0);
-            }
-#endif
 #if USER_MSTP_ACTIVE_DEBUG_ONLY
             MSTP_TOKEN_SUMMARY_LOGI(
                 MSTP_ACTIVE_TAG,
@@ -1582,26 +1565,6 @@ void app_main(void)
                     (unsigned long)mstp_diag.token_passed_counter,
                     (unsigned)dlmstp_max_master());
                 mstp_ring_join_logged = true;
-            }
-            if ((mstp_diag.token_received_counter > 0U) &&
-                (mstp_diag.token_passed_counter == 0U)) {
-                ESP_LOGD(
-                    TAG,
-                    "TOKEN RECEIVED BUT NOT PASSED token_received=%lu token_passed=%lu mstp_state=%s queue_depth=%u",
-                    (unsigned long)mstp_diag.token_received_counter,
-                    (unsigned long)mstp_diag.token_passed_counter,
-                    dlmstp_master_state_text(),
-                    dlmstp_send_pdu_queue_depth());
-            }
-            if ((mstp_diag.poll_for_master_to_us_counter > 0U) &&
-                (mstp_diag.reply_to_poll_for_master_sent_counter == 0U)) {
-                ESP_LOGD(
-                    TAG,
-                    "PFM REPLY NOT ACCEPTED pfm_seen=%lu reply_to_pfm_frame=%lu mstp_state=%s queue_depth=%u",
-                    (unsigned long)mstp_diag.poll_for_master_to_us_counter,
-                    (unsigned long)mstp_diag.reply_to_poll_for_master_sent_counter,
-                    dlmstp_master_state_text(),
-                    dlmstp_send_pdu_queue_depth());
             }
 #endif
             mstp_pdu_count = 0;
