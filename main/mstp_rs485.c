@@ -496,7 +496,7 @@ static void mstp_log_hex_frame_full(const uint8_t *payload, uint16_t payload_len
             hex_buf[(chunk_len * 3) - 1] = '\0';
         }
 
-        ESP_LOGI(TAG, "mstp tx6 hex[%u..%u]=%s", (unsigned)offset,
+        ESP_LOGD(TAG, "mstp tx6 hex[%u..%u]=%s", (unsigned)offset,
             (unsigned)(offset + chunk_len - 1), hex_buf);
         offset = (uint16_t)(offset + chunk_len);
     }
@@ -560,7 +560,7 @@ void MSTP_RS485_Init(void)
     mstp_last_activity_us = esp_timer_get_time();
     mstp_uart_initialized = true;
 
-    ESP_LOGI(
+    ESP_LOGD(
         TAG,
         "MS/TP UART pin map tx_pin=%d rx_pin=%d de_pin=%d baud=%lu rs485_mode=manual_gpio",
         (int)MSTP_UART_TX_PIN,
@@ -823,7 +823,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
 
     if (has_mstp_header) {
         if (!MSTP_MAC25_MIN_LOG_MODE) {
-            ESP_LOGI(
+            ESP_LOGD(
                 TAG,
                 "mstp_tx_turnaround frame_type=%u is_control_frame=%s de_pre_us=%lu dst=%u src=%u uart_wait_tx_done=%s",
                 (unsigned)frame_type,
@@ -841,7 +841,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         tx_info.is_data_frame &&
         (tx_info.frame_type == FRAME_TYPE_BACNET_DATA_NOT_EXPECTING_REPLY)) {
         if (!MSTP_MAC25_MIN_LOG_MODE) {
-            ESP_LOGI(
+            ESP_LOGD(
                 TAG,
                 "mstp TX frame=%u dst=%u src=%u data_len=%u total_len=%u uart_write_ret=%d uart_wait_tx_done=%s",
                 (unsigned)tx_info.frame_type,
@@ -885,7 +885,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
                 prop_log = (long)request_meta->object_property;
             }
 
-            ESP_LOGI(
+            ESP_LOGD(
                 TAG,
                 "mstp tx6 dbg dst=%u src=%u data_len=%u total_len=%u invoke=%d service=%d obj=%d:%ld prop=%ld apdu_len=%d",
                 (unsigned)payload[3],
@@ -917,7 +917,7 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
             }
 
             if (!MSTP_MAC25_MIN_LOG_MODE) {
-                ESP_LOGI(
+                ESP_LOGD(
                     TAG,
                     "final response sent invoke=%u requester_mac=%u service=%u object=%u:%lu property=%lu array=%lu reply_postponed=%s req_to_postponed_ms=%ld req_to_final_ms=%ld pdu=0x%02X tx_ret=%d tx_done=%d",
                     (unsigned)request_meta->invoke_id,

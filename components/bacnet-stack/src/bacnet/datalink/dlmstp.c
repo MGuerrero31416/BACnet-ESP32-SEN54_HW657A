@@ -158,10 +158,12 @@ static bool DLMSTP_Token_Pass_Armed = false;
 #define DLMSTP_DIAG_LOGI(...) do { } while (0)
 #define DLMSTP_DIAG_LOGW(...) do { } while (0)
 #define MSTP_ACTIVE_LOGW(...) ESP_LOGW("mstp_active", __VA_ARGS__)
+#define MSTP_ACTIVE_LOGD(...) ESP_LOGD("mstp_active", __VA_ARGS__)
 #else
-#define DLMSTP_DIAG_LOGI(...) ESP_LOGI("dlmstp_diag", __VA_ARGS__)
-#define DLMSTP_DIAG_LOGW(...) ESP_LOGW("dlmstp_diag", __VA_ARGS__)
+#define DLMSTP_DIAG_LOGI(...) ESP_LOGD("dlmstp_diag", __VA_ARGS__)
+#define DLMSTP_DIAG_LOGW(...) ESP_LOGD("dlmstp_diag", __VA_ARGS__)
 #define MSTP_ACTIVE_LOGW(...) do { } while (0)
+#define MSTP_ACTIVE_LOGD(...) do { } while (0)
 #endif
 static uint64_t dlmstp_diag_timestamp_ms(void)
 {
@@ -171,6 +173,7 @@ static uint64_t dlmstp_diag_timestamp_ms(void)
 #define DLMSTP_DIAG_LOGI(...) debug_printf(__VA_ARGS__)
 #define DLMSTP_DIAG_LOGW(...) debug_printf(__VA_ARGS__)
 #define MSTP_ACTIVE_LOGW(...) debug_printf(__VA_ARGS__)
+#define MSTP_ACTIVE_LOGD(...) debug_printf(__VA_ARGS__)
 static uint64_t dlmstp_diag_timestamp_ms(void)
 {
     return (uint64_t)mstimer_now();
@@ -297,7 +300,7 @@ static void dlmstp_log_raw_frame_bytes(
         used += (size_t)written;
     }
 
-    MSTP_ACTIVE_LOGW("%s bytes=%s", prefix, bytes_text);
+    MSTP_ACTIVE_LOGD("%s bytes=%s", prefix, bytes_text);
 }
 
 static void dlmstp_post_pfm_observe_start(void)
@@ -326,9 +329,9 @@ static void dlmstp_post_pfm_observe_valid_frame(
 
     DLMSTP_Post_PFM_Observe_Logged = true;
     if ((frame_type == FRAME_TYPE_TOKEN) && (source == 16U) && (destination == 17U)) {
-        MSTP_ACTIVE_LOGW("POST_PFM_TOKEN_RX src=16 dst=17");
+        MSTP_ACTIVE_LOGD("POST_PFM_TOKEN_RX src=16 dst=17");
     } else {
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "POST_PFM_NEXT_FRAME src=%u dst=%u frame_type=%u",
             (unsigned)source,
             (unsigned)destination,
@@ -349,7 +352,7 @@ static void dlmstp_post_pfm_observe_check_timeout(void)
     }
 
     if (!DLMSTP_Post_PFM_Observe_Logged) {
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "POST_PFM_NO_VALID_FRAME after_ms=%u",
             (unsigned)DLMSTP_POST_PFM_OBSERVE_WINDOW_MS);
     }
@@ -387,7 +390,7 @@ static void dlmstp_post_pass_observe_valid_frame(
     if (!DLMSTP_Post_Pass_Activity_Seen &&
         (source == DLMSTP_Post_Pass_Observe_Dst)) {
         DLMSTP_Post_Pass_Activity_Seen = true;
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "POST_PASS_ACTIVITY src=%u dst=%u frame_type=%u",
             (unsigned)source,
             (unsigned)destination,
@@ -399,7 +402,7 @@ static void dlmstp_post_pass_observe_valid_frame(
         ((frame_type == FRAME_TYPE_POLL_FOR_MASTER) ||
             (frame_type == FRAME_TYPE_TOKEN))) {
         DLMSTP_Post_Pass_Next_16_Logged = true;
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "POST_PASS_NEXT_16 src=%u dst=%u frame_type=%u",
             (unsigned)source,
             (unsigned)destination,
@@ -419,7 +422,7 @@ static void dlmstp_post_pass_observe_check_timeout(void)
     }
 
     if (!DLMSTP_Post_Pass_Activity_Seen) {
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "POST_PASS_NO_ACTIVITY dst=%u after_ms=%u",
             (unsigned)DLMSTP_Post_Pass_Observe_Dst,
             (unsigned)DLMSTP_POST_PASS_OBSERVE_WINDOW_MS);
@@ -459,7 +462,7 @@ static void dlmstp_post_pfm_window_check_timeout(void)
     if (!DLMSTP_Post_PFM_Expected_Token_Seen) {
         DLMSTP_Token_Diagnostics.pfm_no_token_counter++;
 #if !USER_MSTP_TOKEN_PASS_ONLY_DEBUG
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "PFM_NO_TOKEN src=%u dst=%u after_ms=%u",
             (unsigned)DLMSTP_Post_PFM_Expected_Token_Source,
             (unsigned)DLMSTP_Post_PFM_Expected_Token_Destination,
@@ -488,7 +491,7 @@ static void dlmstp_token_pass_check_timeout(void)
 
     if (MSTP_Port) {
 #if !USER_MSTP_TOKEN_PASS_ONLY_DEBUG
-        MSTP_ACTIVE_LOGW(
+        MSTP_ACTIVE_LOGD(
             "TOKEN_RX_NO_PASS src=%u dst=%u",
             (unsigned)DLMSTP_Token_Cycle_Source,
             (unsigned)DLMSTP_Token_Cycle_Destination);
@@ -1204,14 +1207,7 @@ void MSTP_Send_Frame(
         (void)window_active;
 
         if ((frame_type == FRAME_TYPE_TOKEN) && (source == mstp_port->This_Station)) {
-            if (!DLMSTP_Token_Pass_Armed ||
-                !dlmstp_master_has_token(mstp_port->master_state)) {
-                DLMSTP_DIAG_LOGW(
-                    "token_pass_blocked reason=no_local_token_ownership dst=%u state=%s",
-                    (unsigned)destination,
-                    dlmstp_master_state_text_short(mstp_port->master_state));
-                return;
-            }
+
             token_pass_raw_len = (nbytes < DLMSTP_RAW_LOG_MAX_BYTES) ?
                 nbytes : DLMSTP_RAW_LOG_MAX_BYTES;
             if (token_pass_raw_len > 0U) {
@@ -1224,7 +1220,7 @@ void MSTP_Send_Frame(
             token_pass_frame_pending = true;
             token_pass_dst = destination;
 #if !USER_MSTP_TOKEN_PASS_ONLY_DEBUG
-            MSTP_ACTIVE_LOGW(
+            MSTP_ACTIVE_LOGD(
                 "TOKEN_USE done token_passed=yes app_frames_sent=%u",
                 DLMSTP_Token_Cycle_App_Frames_Sent);
 #endif
@@ -1260,17 +1256,31 @@ void MSTP_Send_Frame(
         MSTP_RS485_TOKEN_PASS_TIMING token_timing = { 0 };
 
         if (MSTP_RS485_Token_Pass_Timing_Get_Reset(&token_timing) && token_timing.valid) {
-            MSTP_ACTIVE_LOGW(
-                "TOKEN_PASS dst=%u pre_delay_us=%u de_pre_us=%u rx_to_de_us=%u de_to_write_us=%u rx_to_write_us=%u write_to_done_us=%u total_us=%u result=%s",
-                (unsigned)token_pass_dst,
-                (unsigned)token_timing.pre_delay_us,
-                (unsigned)token_timing.de_pre_us,
-                (unsigned)token_timing.rx_to_de_us,
-                (unsigned)token_timing.de_to_write_us,
-                (unsigned)token_timing.rx_to_write_us,
-                (unsigned)token_timing.write_to_done_us,
-                (unsigned)token_timing.total_us,
-                token_timing.tx_done_ok ? "sent" : "fail");
+            if (token_pass_dst == 0U) {
+                MSTP_ACTIVE_LOGW(
+                    "TOKEN_PASS dst=%u pre_delay_us=%u de_pre_us=%u rx_to_de_us=%u de_to_write_us=%u rx_to_write_us=%u write_to_done_us=%u total_us=%u result=%s",
+                    (unsigned)token_pass_dst,
+                    (unsigned)token_timing.pre_delay_us,
+                    (unsigned)token_timing.de_pre_us,
+                    (unsigned)token_timing.rx_to_de_us,
+                    (unsigned)token_timing.de_to_write_us,
+                    (unsigned)token_timing.rx_to_write_us,
+                    (unsigned)token_timing.write_to_done_us,
+                    (unsigned)token_timing.total_us,
+                    token_timing.tx_done_ok ? "sent" : "fail");
+            } else {
+                MSTP_ACTIVE_LOGD(
+                    "TOKEN_PASS dst=%u pre_delay_us=%u de_pre_us=%u rx_to_de_us=%u de_to_write_us=%u rx_to_write_us=%u write_to_done_us=%u total_us=%u result=%s",
+                    (unsigned)token_pass_dst,
+                    (unsigned)token_timing.pre_delay_us,
+                    (unsigned)token_timing.de_pre_us,
+                    (unsigned)token_timing.rx_to_de_us,
+                    (unsigned)token_timing.de_to_write_us,
+                    (unsigned)token_timing.rx_to_write_us,
+                    (unsigned)token_timing.write_to_done_us,
+                    (unsigned)token_timing.total_us,
+                    token_timing.tx_done_ok ? "sent" : "fail");
+            }
         }
         if (token_pass_raw_len > 0U) {
             dlmstp_log_raw_frame_bytes("TOKEN_PASS_RAW", token_pass_raw, token_pass_raw_len);
@@ -1433,10 +1443,17 @@ uint16_t dlmstp_receive(
             user->Statistics.poll_for_master_counter++;
             if (MSTP_Port->DestinationAddress == MSTP_Port->This_Station) {
                 DLMSTP_Token_Diagnostics.poll_for_master_to_us_counter++;
-                MSTP_ACTIVE_LOGW(
-                    "PFM_RX src=%u dst=%u",
-                    (unsigned)MSTP_Port->SourceAddress,
-                    (unsigned)MSTP_Port->DestinationAddress);
+                if (MSTP_Port->This_Station == 33U) {
+                    MSTP_ACTIVE_LOGW(
+                        "PFM_RX src=%u dst=%u",
+                        (unsigned)MSTP_Port->SourceAddress,
+                        (unsigned)MSTP_Port->DestinationAddress);
+                } else {
+                    MSTP_ACTIVE_LOGD(
+                        "PFM_RX src=%u dst=%u",
+                        (unsigned)MSTP_Port->SourceAddress,
+                        (unsigned)MSTP_Port->DestinationAddress);
+                }
 #if defined(ESP_PLATFORM)
                 DLMSTP_PFM_To_Us_Last_Rx_Us = (uint64_t)esp_timer_get_time();
 #else
@@ -1448,10 +1465,17 @@ uint16_t dlmstp_receive(
             (MSTP_Port->DestinationAddress == MSTP_Port->This_Station)) {
             DLMSTP_Token_Diagnostics.token_received_counter++;
             DLMSTP_Token_Pass_Armed = true;
-            MSTP_ACTIVE_LOGW(
-                "TOKEN_RX src=%u dst=%u",
-                (unsigned)MSTP_Port->SourceAddress,
-                (unsigned)MSTP_Port->DestinationAddress);
+            if (MSTP_Port->This_Station == 33U) {
+                MSTP_ACTIVE_LOGW(
+                    "TOKEN_RX src=%u dst=%u",
+                    (unsigned)MSTP_Port->SourceAddress,
+                    (unsigned)MSTP_Port->DestinationAddress);
+            } else {
+                MSTP_ACTIVE_LOGD(
+                    "TOKEN_RX src=%u dst=%u",
+                    (unsigned)MSTP_Port->SourceAddress,
+                    (unsigned)MSTP_Port->DestinationAddress);
+            }
 #if defined(ESP_PLATFORM)
             MSTP_RS485_Token_RX_Timestamp_Set((uint64_t)esp_timer_get_time());
 #else
@@ -1483,7 +1507,7 @@ uint16_t dlmstp_receive(
             DLMSTP_Token_Pass_Deadline_Ms = dlmstp_diag_timestamp_ms() +
                 MSTP_Port->Tusage_timeout + 100U;
 #if !USER_MSTP_TOKEN_PASS_ONLY_DEBUG
-            MSTP_ACTIVE_LOGW(
+            MSTP_ACTIVE_LOGD(
                 "TOKEN_USE start queue_depth=%u",
                 dlmstp_send_pdu_queue_depth());
             if (!DLMSTP_MAC25_MIN_LOG_MODE) {
@@ -1600,12 +1624,14 @@ uint16_t dlmstp_receive(
                         (new_state == MSTP_MASTER_STATE_IDLE ||
                             new_state == MSTP_MASTER_STATE_NO_TOKEN)) {
 #if !USER_MSTP_TOKEN_PASS_ONLY_DEBUG
-                        MSTP_ACTIVE_LOGW(
+                        MSTP_ACTIVE_LOGD(
                             "TOKEN_USE done token_passed=no app_frames_sent=%u",
                             DLMSTP_Token_Cycle_App_Frames_Sent);
 #endif
                         if (!DLMSTP_MAC25_MIN_LOG_MODE) {
-                            DLMSTP_DIAG_LOGW(
+#if defined(ESP_PLATFORM)
+                            ESP_LOGW(
+                                "dlmstp_diag",
                                 "TOKEN USE ENDED WITHOUT PASSING TOKEN src=%u dst=%u next_station=%u poll_station=%u mstp_state=%s queue_depth=%u",
                                 (unsigned)DLMSTP_Token_Cycle_Source,
                                 (unsigned)DLMSTP_Token_Cycle_Destination,
@@ -1613,6 +1639,16 @@ uint16_t dlmstp_receive(
                                 (unsigned)MSTP_Port->Poll_Station,
                                 dlmstp_master_state_text_short(new_state),
                                 dlmstp_send_pdu_queue_depth());
+#else
+                            debug_printf(
+                                "TOKEN USE ENDED WITHOUT PASSING TOKEN src=%u dst=%u next_station=%u poll_station=%u mstp_state=%s queue_depth=%u",
+                                (unsigned)DLMSTP_Token_Cycle_Source,
+                                (unsigned)DLMSTP_Token_Cycle_Destination,
+                                (unsigned)MSTP_Port->Next_Station,
+                                (unsigned)MSTP_Port->Poll_Station,
+                                dlmstp_master_state_text_short(new_state),
+                                dlmstp_send_pdu_queue_depth());
+#endif
                         }
                         DLMSTP_Token_Cycle_Active = false;
                             DLMSTP_Token_Pass_Deadline_Ms = 0;

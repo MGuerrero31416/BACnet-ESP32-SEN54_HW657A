@@ -82,8 +82,8 @@ static const char *MSTP_ACTIVE_TAG = "mstp_active";
 #define BACNET_SEN54_LOGI(...) do { } while (0)
 #define BACNET_SEN54_LOGW(...) do { } while (0)
 #else
-#define BACNET_DISCOVERY_LOGI(...) ESP_LOGI(__VA_ARGS__)
-#define BACNET_DISCOVERY_LOGW(...) ESP_LOGW(__VA_ARGS__)
+#define BACNET_DISCOVERY_LOGI(...) ESP_LOGD(__VA_ARGS__)
+#define BACNET_DISCOVERY_LOGW(...) ESP_LOGD(__VA_ARGS__)
 #define BACNET_SEN54_LOGI(...) ESP_LOGI(__VA_ARGS__)
 #define BACNET_SEN54_LOGW(...) ESP_LOGW(__VA_ARGS__)
 #endif
@@ -572,7 +572,7 @@ static int bacnet_send_i_am_with_reason(
 #if !USER_MSTP_ACTIVE_DEBUG_ONLY
 static void bacnet_discovery_summary_log_and_reset(void)
 {
-    ESP_LOGI(
+    ESP_LOGD(
         TAG,
         "discovery summary: discovered=%s retry_attempts=%lu unicast_i_am_sent=%lu broadcast_i_am_sent=%lu confirmed_requests_seen=%lu queue_depth=%u compat_i_am_sent=%lu global_whois=%lu limited_1_1=%lu remote_i_am=%lu",
         s_bacrouter_discovery_succeeded ? "yes" : "no",
@@ -1585,7 +1585,7 @@ void app_main(void)
             }
             if ((mstp_diag.token_received_counter > 0U) &&
                 (mstp_diag.token_passed_counter == 0U)) {
-                ESP_LOGW(
+                ESP_LOGD(
                     TAG,
                     "TOKEN RECEIVED BUT NOT PASSED token_received=%lu token_passed=%lu mstp_state=%s queue_depth=%u",
                     (unsigned long)mstp_diag.token_received_counter,
@@ -1595,7 +1595,7 @@ void app_main(void)
             }
             if ((mstp_diag.poll_for_master_to_us_counter > 0U) &&
                 (mstp_diag.reply_to_poll_for_master_sent_counter == 0U)) {
-                ESP_LOGW(
+                ESP_LOGD(
                     TAG,
                     "PFM REPLY NOT ACCEPTED pfm_seen=%lu reply_to_pfm_frame=%lu mstp_state=%s queue_depth=%u",
                     (unsigned long)mstp_diag.poll_for_master_to_us_counter,
