@@ -689,11 +689,22 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
         tx_wait_ticks = mstp_uart_tx_wait_ticks_for_frame(payload_len);
     }
 
-    tx_done = uart_wait_tx_done(MSTP_UART_PORT, tx_wait_ticks);
-    if (written >= 0) {
-        mstp_last_uart_result = (int)tx_done;
-    }
-    mstp_rs485_set_tx_mode(false);
+            tx_done = uart_wait_tx_done(MSTP_UART_PORT, tx_wait_ticks);
+
+            if (written >= 0) {
+                mstp_last_uart_result = (int)tx_done;
+            }
+
+            /*
+            * Keep DE asserted briefly after the UART reports completion,
+            * ensuring the final stop/CRC byte reaches the RS485 bus.
+            */
+            if (tx_done == ESP_OK) {
+                esp_rom_delay_us(
+                    (uint32_t)MSTP_RS485_DE_POST_TX_GUARD_MS * 1000U);
+            }
+
+            mstp_rs485_set_tx_mode(false);
     if (is_reply_to_pfm || token_pass_only_timing) {
         tx_done_time_us = esp_timer_get_time();
     }

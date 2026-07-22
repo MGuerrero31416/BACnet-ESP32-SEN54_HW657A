@@ -1429,11 +1429,11 @@ void app_main(void)
             ESP_LOGE(TAG, "Failed to create bacnet_rx task");
         }
     }
-    if (USER_ENABLE_BACNET_MSTP) {
-        if (xTaskCreate(bacnet_mstp_receive_task, "bacnet_mstp_rx", 12288, NULL, 5, NULL) != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create bacnet_mstp_rx task");
-        }
+  if (USER_ENABLE_BACNET_MSTP) {
+    if (xTaskCreatePinnedToCore(bacnet_mstp_receive_task, "bacnet_mstp_rx", 12288, NULL, 10, NULL, 1) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create bacnet_mstp_rx task");
     }
+}
     if (xTaskCreate(bacnet_cov_task, "bacnet_cov", 24576, NULL, 4, &bacnet_cov_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create bacnet_cov task");
     }
