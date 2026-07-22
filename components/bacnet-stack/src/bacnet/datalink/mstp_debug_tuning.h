@@ -3,7 +3,7 @@
 /* Production MS/TP tuning defaults shared by this project. */
 
 #define USER_MSTP_ACTIVE_DEBUG_ONLY 0
-#define USER_MSTP_TOKEN_PASS_ONLY_DEBUG 0
+#define USER_MSTP_TOKEN_PASS_ONLY_DEBUG 1
 #define USER_MSTP_DEBUG_FORCE_NEXT_STATION 0
 
 #if USER_MSTP_ACTIVE_DEBUG_ONLY
