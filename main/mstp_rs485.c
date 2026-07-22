@@ -945,23 +945,45 @@ void MSTP_RS485_Send(const uint8_t *payload, uint16_t payload_len)
 
 bool MSTP_RS485_Read(uint8_t *buf)
 {
-    if (!buf) {
-        return false;
-    }
     if (!mstp_uart_initialized) {
         MSTP_RS485_Init();
     }
 
-    int len = uart_read_bytes(MSTP_UART_PORT, buf, 1, 0);
+    /*
+     * dlmstp_receive() calls read(NULL) to check whether more
+     * received bytes are waiting. Do not consume a byte here.
+     */
+    if (!buf) {
+        size_t buffered_len = 0;
+
+        if (uart_get_buffered_data_len(
+                MSTP_UART_PORT,
+                &buffered_len) != ESP_OK) {
+            return false;
+        }
+
+        return buffered_len > 0;
+    }
+
+    int len = uart_read_bytes(
+        MSTP_UART_PORT,
+        buf,
+        1,
+        0);
+
     if (len > 0) {
         mstp_last_activity_us = esp_timer_get_time();
         mstp_rx_bytes += (uint32_t)len;
+
         if (*buf == 0x55) {
             mstp_preamble_55++;
         }
-        if (mstp_prev_byte == 0x55 && *buf == 0xFF) {
+
+        if ((mstp_prev_byte == 0x55) &&
+            (*buf == 0xFF)) {
             mstp_preamble_55ff++;
         }
+
         mstp_prev_byte = *buf;
         return true;
     }
